@@ -23,6 +23,7 @@
 - Added caption-first extraction with local Whisper fallback.
 - Added SRT, TXT, and JSON artifact rendering.
 - Added rolling-caption deduplication for YouTube auto-caption VTT files.
+- Added video titles to artifact filenames and SRT/TXT content.
 - Added unit/integration tests and an opt-in live YouTube smoke test.
 
 ## Decisions
@@ -74,4 +75,12 @@ Install or locate CUDA 12 cuBLAS and cuDNN 9 if GPU Whisper is required, then ru
 - Collapsed rolling windows by carrying forward existing lines and emitting only newly introduced text.
 - Added regression coverage for rolling captions, leading blank cue lines, and legitimate repeated text after a gap.
 - Retested video `HJHPkBYoo9I`: output reduced from 368 to 185 segments with no adjacent duplicate text or overlapping timestamps.
+- Verification: `31 passed, 1 skipped`; lint and lockfile checks passed.
+
+### 2026-07-27 - Video title artifacts
+
+- Added a normalized `Title:` header to TXT output and a separate SRT header before cue 1.
+- Added sanitized Unicode video titles to SRT, TXT, and JSON filenames while retaining the video ID and language.
+- Protected Windows filenames from invalid characters, reserved names, trailing dots/spaces, and excessive title length.
+- Retested video `HJHPkBYoo9I`; all artifacts include the title and the API job completed successfully.
 - Verification: `31 passed, 1 skipped`; lint and lockfile checks passed.

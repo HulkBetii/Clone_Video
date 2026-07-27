@@ -89,7 +89,7 @@ Again
 def test_render_artifacts_writes_utf8_srt_txt_and_json(tmp_path: Path):
     video = VideoMetadata(
         id="dQw4w9WgXcQ",
-        title="Demo",
+        title="Demo: Video?",
         channel="Channel",
         duration_seconds=2,
         webpage_url="https://youtube.com/watch?v=dQw4w9WgXcQ",
@@ -110,9 +110,13 @@ def test_render_artifacts_writes_utf8_srt_txt_and_json(tmp_path: Path):
     )
 
     assert (
-        files["srt"].read_text(encoding="utf-8") == "1\n00:00:00,000 --> 00:00:01,234\nXin chào\n"
+        files["srt"].read_text(encoding="utf-8")
+        == "Title: Demo: Video?\n\n1\n00:00:00,000 --> 00:00:01,234\nXin chào\n"
     )
-    assert files["txt"].read_text(encoding="utf-8") == "Xin chào\n"
+    assert files["txt"].read_text(encoding="utf-8") == "Title: Demo: Video?\n\nXin chào\n"
+    assert files["srt"].name == "Demo_ Video_.dQw4w9WgXcQ.vi.srt"
+    assert files["txt"].name == "Demo_ Video_.dQw4w9WgXcQ.vi.txt"
+    assert files["json"].name == "Demo_ Video_.dQw4w9WgXcQ.vi.json"
     artifact = json.loads(files["json"].read_text(encoding="utf-8"))
     assert artifact["schema_version"] == 1
     assert artifact["segments"][0]["index"] == 1

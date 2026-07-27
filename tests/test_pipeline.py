@@ -86,7 +86,9 @@ def test_pipeline_uses_caption_without_downloading_audio(settings):
     assert result.language == "en"
     assert not youtube.audio_downloaded
     assert not transcriber.called
-    assert result.artifact_paths["txt"].read_text(encoding="utf-8") == "Caption text\n"
+    assert (
+        result.artifact_paths["txt"].read_text(encoding="utf-8") == "Title: Demo\n\nCaption text\n"
+    )
     assert not (settings.temp_dir / "caption-job").exists()
 
 
@@ -106,4 +108,6 @@ def test_pipeline_falls_back_to_whisper_when_captions_are_missing(settings):
     assert result.language == "vi"
     assert youtube.audio_downloaded
     assert transcriber.called
-    assert result.artifact_paths["txt"].read_text(encoding="utf-8") == "Whisper text\n"
+    assert (
+        result.artifact_paths["txt"].read_text(encoding="utf-8") == "Title: Demo\n\nWhisper text\n"
+    )

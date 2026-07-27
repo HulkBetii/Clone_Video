@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import json
 import re
+import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +25,17 @@ TIMING_PATTERN = re.compile(
 INLINE_TIMESTAMP_PATTERN = re.compile(r"<(?:\d{2}:)?\d{2}:\d{2}[.,]\d{3}>")
 ROLLING_CUE_GAP_MS = 1000
 MIN_TEXT_OVERLAP = 4
+MAX_FILENAME_TITLE_LENGTH = 100
+TITLE_PREFIX = "Title: "
+INVALID_FILENAME_PATTERN = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
+WINDOWS_RESERVED_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
 
 
 @dataclass(frozen=True)
@@ -258,13 +270,16 @@ def render_artifacts(
         segments=normalized_segments,
         warnings=warnings,
     )
+    title = _normalize_title(video.title)
+    filename_title = _safe_filename_title(title)
+    filename_stem = f"{filename_title}.{video.id}.{language}"
     files = {
-        "srt": output_dir / f"{video.id}.{language}.srt",
-        "txt": output_dir / f"{video.id}.{language}.txt",
-        "json": output_dir / f"{video.id}.{language}.json",
+        "srt": output_dir / f"{filename_stem}.srt",
+        "txt": output_dir / f"{filename_stem}.txt",
+        "json": output_dir / f"{filename_stem}.json",
     }
-    _atomic_write(files["srt"], to_srt(normalized_segments))
-    _atomic_write(files["txt"], to_text(normalized_segments))
+    _atomic_write(files["srt"], to_srt(normalized_segments, title=title))
+    _atomic_write(files["txt"], to_text(normalized_segments, title=title))
     _atomic_write(
         files["json"],
         json.dumps(artifact.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n",
@@ -272,17 +287,40 @@ def render_artifacts(
     return files
 
 
-def to_srt(segments: Iterable[TranscriptSegment]) -> str:
+def to_srt(segments: Iterable[TranscriptSegment], *, title: str | None = None) -> str:
     blocks = []
+    normalized_title = _normalize_title(title)
     for index, segment in enumerate(segments, 1):
         start = _format_timestamp(segment.start_ms)
         end = _format_timestamp(segment.end_ms)
         blocks.append(f"{index}\n{start} --> {end}\n{segment.text}\n")
-    return "\n".join(blocks)
+    body = "\n".join(blocks)
+    if normalized_title:
+        return f"{TITLE_PREFIX}{normalized_title}\n\n{body}"
+    return body
 
 
-def to_text(segments: Iterable[TranscriptSegment]) -> str:
-    return " ".join(segment.text for segment in segments).strip() + "\n"
+def to_text(segments: Iterable[TranscriptSegment], *, title: str | None = None) -> str:
+    body = " ".join(segment.text for segment in segments).strip()
+    normalized_title = _normalize_title(title)
+    if normalized_title:
+        return f"{TITLE_PREFIX}{normalized_title}\n\n{body}\n"
+    return body + "\n"
+
+
+def _normalize_title(value: str | None) -> str:
+    if not value:
+        return ""
+    normalized = unicodedata.normalize("NFKC", value)
+    return WHITESPACE_PATTERN.sub(" ", normalized).strip()
+
+
+def _safe_filename_title(title: str) -> str:
+    safe_title = INVALID_FILENAME_PATTERN.sub("_", title).strip(" .")
+    safe_title = safe_title[:MAX_FILENAME_TITLE_LENGTH].rstrip(" .") or "untitled"
+    if safe_title.upper() in WINDOWS_RESERVED_NAMES:
+        safe_title = f"_{safe_title}"
+    return safe_title
 
 
 def _clean_text(value: str) -> str:
