@@ -25,6 +25,17 @@ class JobStage(StrEnum):
     RENDERING = "rendering"
 
 
+class RewriteStage(StrEnum):
+    PREPARING_SOURCE = "preparing_source"
+    ANALYZING_STYLE = "analyzing_style"
+    PLANNING = "planning"
+    UPLOADING = "uploading"
+    REWRITING = "rewriting"
+    EDITING = "editing"
+    VALIDATING = "validating"
+    RENDERING = "rendering"
+
+
 class TranscriptSource(StrEnum):
     MANUAL_CAPTION = "manual_caption"
     AUTOMATIC_CAPTION = "automatic_caption"
@@ -53,6 +64,19 @@ class CreateTranscriptJobRequest(BaseModel):
             raise ValueError("language must be a BCP-47-like language code")
         parts = normalized.split("-")
         return "-".join([parts[0].lower(), *parts[1:]])
+
+
+class CreateRewriteJobRequest(BaseModel):
+    transcript_job_id: str = Field(min_length=1, max_length=128)
+    force_refresh: bool = False
+
+    @field_validator("transcript_job_id")
+    @classmethod
+    def strip_transcript_job_id(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("transcript_job_id must not be empty")
+        return normalized
 
 
 class ErrorInfo(BaseModel):
@@ -89,6 +113,31 @@ class JobResponse(BaseModel):
     language_confidence: float | None = None
     video: VideoMetadata | None = None
     artifacts: ArtifactLinks | None = None
+    warnings: list[str] = Field(default_factory=list)
+    error: ErrorInfo | None = None
+    cached: bool = False
+    created_at: str
+    updated_at: str
+
+
+class RewriteArtifactLinks(BaseModel):
+    txt: str
+
+
+class RewriteJobResponse(BaseModel):
+    id: str
+    transcript_job_id: str
+    status: JobStatus
+    stage: RewriteStage | None = None
+    progress: int = Field(ge=0, le=100)
+    video: VideoMetadata | None = None
+    language: str | None = None
+    source_length: int | None = Field(default=None, ge=0)
+    output_length: int | None = Field(default=None, ge=0)
+    sections_completed: int = Field(default=0, ge=0)
+    sections_total: int = Field(default=0, ge=0)
+    title: str | None = None
+    artifacts: RewriteArtifactLinks | None = None
     warnings: list[str] = Field(default_factory=list)
     error: ErrorInfo | None = None
     cached: bool = False

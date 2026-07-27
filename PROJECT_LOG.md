@@ -8,8 +8,8 @@
 
 ## Current Status
 
-- Phase: Backend v1 implemented
-- Backend: YouTube transcript API implemented and verified; health is degraded until CUDA 12 runtime libraries are installed
+- Phase: Backend v2 rewrite pipeline implemented
+- Backend: YouTube transcript and Playwright GPT rewrite APIs implemented and verified; live GPT smoke remains opt-in
 - Frontend/UI: Deferred
 - Skills: Not installed yet
 - Repository: Python 3.11 FastAPI project with SQLite job persistence
@@ -24,6 +24,7 @@
 - Added SRT, TXT, and JSON artifact rendering.
 - Added rolling-caption deduplication for YouTube auto-caption VTT files.
 - Added video titles to artifact filenames and SRT/TXT content.
+- Added asynchronous GPT rewrite jobs with adaptive chunking and TTS-ready TXT output.
 - Added unit/integration tests and an opt-in live YouTube smoke test.
 
 ## Decisions
@@ -35,6 +36,8 @@
 | 2026-07-27 | Use Python 3.11, FastAPI, SQLite, and uv | Match the local ML/media tooling and keep the backend easy to run locally. |
 | 2026-07-27 | Prefer manual captions, then auto captions, then local Whisper | Minimize processing cost while supporting videos without captions. |
 | 2026-07-27 | Support public/unlisted completed videos only | Avoid bypassing access controls and realtime livestream complexity. |
+| 2026-07-27 | Keep rewrite jobs separate from transcript jobs | Allow independent cache, retry, restart recovery, and GPT failure handling. |
+| 2026-07-27 | Use the existing auto_YT GPT profile without fallback | Reuse the authenticated local browser while preventing silent account/profile changes. |
 
 ## Milestones
 
@@ -44,11 +47,12 @@
 - [x] Implement backend foundation
 - [x] Add automated tests
 - [x] Validate backend integration points
+- [x] Implement Playwright GPT rewrite backend
 - [ ] Revisit UI requirements
 
 ## Next Step
 
-Install or locate CUDA 12 cuBLAS and cuDNN 9 if GPU Whisper is required, then run a real `turbo` no-caption transcription; CPU fallback is currently working.
+Stop other processes using `PROFILE_GPT_1`, then run the opt-in ChatGPT attachment smoke test. CUDA 12 cuBLAS/cuDNN installation remains optional for GPU Whisper.
 
 ## Change History
 
@@ -84,3 +88,18 @@ Install or locate CUDA 12 cuBLAS and cuDNN 9 if GPU Whisper is required, then ru
 - Protected Windows filenames from invalid characters, reserved names, trailing dots/spaces, and excessive title length.
 - Retested video `HJHPkBYoo9I`; all artifacts include the title and the API job completed successfully.
 - Verification: `31 passed, 1 skipped`; lint and lockfile checks passed.
+
+### 2026-07-27 - GPT video rewrite backend
+
+- Added separate SQLite-backed rewrite jobs, API polling, cache reuse, force refresh, artifact download, and restart checkpoints.
+- Added a dedicated single-concurrency async Playwright worker using the existing `auto_YT` persistent ChatGPT profile.
+- Added resilient file upload, login/profile-lock checks, stable response extraction, conversation restore, request deduplication, and classified retries.
+- Added source isolation prompts, global style analysis, exact-coverage outlines, adaptive semantic chunks, section rewriting, editorial passes, and independent GPT validation.
+- Added persisted seam editing so adjacent long-form sections receive a bounded transition pass before independent validation.
+- Enforced validator language/unsupported-claim/missing-point fields, immediate conversation checkpoint persistence, and stable Playwright request recovery without accepting transient placeholders.
+- Scoped rewrite cache to source content and pipeline/profile/length policy, independent of transcript job ID.
+- Made rewrite shutdown cancellation-safe, preserved unfinished jobs for restart recovery, and kept the worker alive after isolated failures.
+- Standardized immediate rewrite API failures on the shared error contract.
+- Enforced one SEO title, source-language output, 100-130% normalized length, sponsor removal, generic CTA retention, and ElevenLabs/Minimax-ready plain text.
+- Added deterministic validation, atomic TXT rendering, short/long integration coverage, and an opt-in live ChatGPT attachment smoke test.
+- Verification: `80 passed, 2 skipped`; Ruff check/format, lockfile, and diff checks passed.
