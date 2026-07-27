@@ -22,6 +22,7 @@
 - Added asynchronous job API, SQLite persistence, cache, and restart recovery.
 - Added caption-first extraction with local Whisper fallback.
 - Added SRT, TXT, and JSON artifact rendering.
+- Added rolling-caption deduplication for YouTube auto-caption VTT files.
 - Added unit/integration tests and an opt-in live YouTube smoke test.
 
 ## Decisions
@@ -66,3 +67,11 @@ Install or locate CUDA 12 cuBLAS and cuDNN 9 if GPU Whisper is required, then ru
 - Added SRT/TXT/JSON rendering with normalized timestamps and UTF-8 output.
 - Verification: `29 passed, 1 skipped`; live public YouTube metadata and caption smoke checks passed.
 - Real Whisper smoke with the `tiny` model succeeded on CPU fallback; CUDA reported `cublas64_12.dll` missing and health now reports `degraded`.
+
+### 2026-07-27 - Rolling caption normalization
+
+- Replaced `webvtt-py` parsing with a direct VTT cue parser to preserve inline-timestamp cues.
+- Collapsed rolling windows by carrying forward existing lines and emitting only newly introduced text.
+- Added regression coverage for rolling captions, leading blank cue lines, and legitimate repeated text after a gap.
+- Retested video `HJHPkBYoo9I`: output reduced from 368 to 185 segments with no adjacent duplicate text or overlapping timestamps.
+- Verification: `31 passed, 1 skipped`; lint and lockfile checks passed.

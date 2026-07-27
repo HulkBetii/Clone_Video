@@ -30,6 +30,62 @@ Hello &amp; welcome
     assert segments[1].text == "Next line"
 
 
+def test_parse_vtt_collapses_youtube_rolling_captions(tmp_path: Path):
+    caption_path = tmp_path / "rolling.vtt"
+    caption_path.write_text(
+        """WEBVTT
+Kind: captions
+
+00:00:00.160 --> 00:00:02.610
+
+Alpha<00:00:00.500><c> phrase</c>
+
+00:00:02.610 --> 00:00:02.620
+Alpha phrase
+
+00:00:02.620 --> 00:00:05.430
+Alpha phrase
+Beta<00:00:03.000><c> phrase</c>
+
+00:00:05.430 --> 00:00:05.440
+Beta phrase
+
+00:00:05.440 --> 00:00:08.669
+Beta phrase
+Gamma<00:00:06.000><c> phrase</c>
+""",
+        encoding="utf-8",
+    )
+
+    segments = parse_vtt(caption_path)
+
+    assert [(segment.start_ms, segment.end_ms, segment.text) for segment in segments] == [
+        (160, 2620, "Alpha phrase"),
+        (2620, 5440, "Beta phrase"),
+        (5440, 8669, "Gamma phrase"),
+    ]
+
+
+def test_parse_vtt_keeps_legitimate_repeated_text_after_a_gap(tmp_path: Path):
+    caption_path = tmp_path / "repeated.vtt"
+    caption_path.write_text(
+        """WEBVTT
+
+00:00.000 --> 00:01.000
+Again
+
+00:03.000 --> 00:04.000
+Again
+""",
+        encoding="utf-8",
+    )
+
+    segments = parse_vtt(caption_path)
+
+    assert len(segments) == 2
+    assert segments[0].text == segments[1].text == "Again"
+
+
 def test_render_artifacts_writes_utf8_srt_txt_and_json(tmp_path: Path):
     video = VideoMetadata(
         id="dQw4w9WgXcQ",
