@@ -1,0 +1,42 @@
+[project]
+name = "yt-pro-max"
+version = "0.1.0"
+description = "Local API for extracting YouTube captions or transcribing video audio."
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "fastapi>=0.140.0",
+    "faster-whisper>=1.2.1",
+    "pydantic-settings>=2.10.0",
+    "uvicorn[standard]>=0.35.0",
+    "webvtt-py>=0.5.1",
+    "yt-dlp[curl-cffi,default]>=2026.7.4",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=8.4.0",
+    "pytest-asyncio>=1.1.0",
+    "ruff>=0.12.0",
+]
+
+[project.scripts]
+yt-pro-max = "yt_pro_max.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/yt_pro_max"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
