@@ -12,7 +12,8 @@ from yt_pro_max.errors import PipelineError
 from yt_pro_max.gpt_playwright import ChatGPTResponse
 from yt_pro_max.models import JobStatus
 from yt_pro_max.repository import StoredJob
-from yt_pro_max.rewrite_pipeline import RewritePipeline
+from yt_pro_max.rewrite_content import RewriteBrief
+from yt_pro_max.rewrite_pipeline import CHATGPT_URL, RewritePipeline, _EditGroup
 from yt_pro_max.rewrite_repository import StoredRewriteJob
 
 
@@ -107,6 +108,21 @@ class InvalidGPT:
 
     async def close(self) -> None:
         return None
+
+
+class CrashingGPT:
+    def __init__(self) -> None:
+        self.close_calls = 0
+
+    async def run_prompt(self, *_args, **_kwargs):
+        raise PipelineError(
+            "GPT_BROWSER_CRASHED",
+            "Browser crashed.",
+            retryable=True,
+        )
+
+    async def close(self) -> None:
+        self.close_calls += 1
 
 
 class InvalidValidatorGPT(FakeGPT):
@@ -206,11 +222,44 @@ class ValidationGPT(FakeGPT):
         )
 
 
+class LengthRepairGPT(FakeGPT):
+    async def run_prompt(self, prompt: str, **kwargs) -> ChatGPTResponse:
+        if ":repair:" in str(kwargs.get("request_id")):
+            self.rewritten_body = "b" * 110
+        return await super().run_prompt(prompt, **kwargs)
+
+
+class ShrinkingRepairGPT(FakeGPT):
+    async def run_prompt(self, prompt: str, **kwargs) -> ChatGPTResponse:
+        request_id = str(kwargs.get("request_id"))
+        if ":validate:" in request_id:
+            self.calls.append({"prompt": prompt, **kwargs})
+            return ChatGPTResponse(
+                text=json.dumps(
+                    {
+                        "passed": False,
+                        "language_match": True,
+                        "style_score": 70,
+                        "coverage_score": 70,
+                        "tts_ready": True,
+                        "unsupported_claims": [],
+                        "missing_points": ["central idea"],
+                        "targeted_repairs": ["Restore the central idea"],
+                    }
+                ),
+                conversation_url="https://chatgpt.com/c/validator-demo",
+            )
+        if ":repair:" in request_id:
+            self.rewritten_body = "b" * 90
+        return await super().run_prompt(prompt, **kwargs)
+
+
 def _source_job(source_path: Path) -> StoredJob:
     return StoredJob(
         id="transcript-job",
         cache_key="source-cache",
         request_url="https://youtube.com/watch?v=demo",
+        auto_rewrite_requested=False,
         requested_language=None,
         force_refresh=False,
         status=JobStatus.COMPLETED,
@@ -286,11 +335,180 @@ async def test_rewrite_pipeline_generates_valid_txt_and_checkpoints(settings, tm
         f"Title: A Better SEO Title\n\n{'b' * 110}\n"
     )
     assert result.checkpoint["completed"] is True
+    assert result.validation == {
+        "passed": True,
+        "style_score": 92.0,
+        "coverage_score": 94.0,
+        "language_match": True,
+        "tts_ready": True,
+        "unsupported_claims": [],
+        "missing_points": [],
+        "length_ratio": 1.1,
+    }
     assert any(call["attachment"] for call in fake_gpt.calls)
     assert any(args[0].value == "validating" for args, _kwargs in updates)
+    edit_call = next(call for call in fake_gpt.calls if ":edit:" in str(call["request_id"]))
+    validation_call = next(
+        call for call in fake_gpt.calls if ":validate:" in str(call["request_id"])
+    )
+    assert edit_call["attachment"] is not None
+    assert "b" * 110 not in str(edit_call["prompt"])
+    assert validation_call["attachment"] is not None
+    assert "a" * 100 not in str(validation_call["prompt"])
+    assert "b" * 110 not in str(validation_call["prompt"])
 
     await pipeline.close()
     assert fake_gpt.closed
+
+
+@pytest.mark.asyncio
+async def test_length_repair_prompt_includes_exact_bounds(settings):
+    source_path = settings.jobs_dir / "source-job" / "source.txt"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text(f"Title: Source title\n\n{'a' * 100}\n", encoding="utf-8")
+    fake_gpt = LengthRepairGPT("b" * 90)
+    pipeline = RewritePipeline(settings, gpt=fake_gpt)
+
+    result = await pipeline.process(
+        _rewrite_job(source_path),
+        _source_job(source_path),
+        lambda *_args, **_kwargs: None,
+    )
+
+    repair_call = next(
+        call for call in fake_gpt.calls if ":repair:" in str(call["request_id"])
+    )
+    assert repair_call["attachment"] is not None
+    assert "from 90 to at least 100 normalized characters (target about 110)" in str(
+        repair_call["prompt"]
+    )
+    assert repair_call["conversation_url"] == CHATGPT_URL
+    repair_text = Path(repair_call["attachment"]).read_text(encoding="utf-8")
+    assert repair_text.strip() == "b" * 90
+    assert result.output_length == 110
+
+
+@pytest.mark.asyncio
+async def test_repair_resume_does_not_chain_shrinking_candidates(settings):
+    source_path = settings.jobs_dir / "source-job" / "source.txt"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text(f"Title: Source title\n\n{'a' * 100}\n", encoding="utf-8")
+    fake_gpt = ShrinkingRepairGPT("b" * 110)
+    pipeline = RewritePipeline(settings, gpt=fake_gpt)
+
+    with pytest.raises(PipelineError) as error:
+        await pipeline.process(
+            _rewrite_job(source_path),
+            _source_job(source_path),
+            lambda *_args, **_kwargs: None,
+        )
+
+    assert error.value.info.code == "STYLE_VALIDATION_FAILED"
+    repair_input = (
+        settings.rewrite_temp_dir / "rewrite-job" / "repair-input-001-01.txt"
+    ).read_text(encoding="utf-8")
+    assert "b" * 110 in repair_input
+
+
+def test_validation_summary_uses_minimum_scores_and_unions_issues(settings):
+    pipeline = RewritePipeline(settings, gpt=RejectingGPT())
+
+    summary = pipeline._aggregate_validation(
+        [
+            {
+                "passed": True,
+                "style_score": 95,
+                "coverage_score": 91,
+                "language_match": True,
+                "tts_ready": True,
+                "unsupported_claims": ["claim one"],
+                "missing_points": [],
+            },
+            {
+                "passed": False,
+                "style_score": 88,
+                "coverage_score": 93,
+                "language_match": False,
+                "tts_ready": True,
+                "unsupported_claims": ["claim one", "claim two"],
+                "missing_points": ["point one"],
+            },
+        ],
+        source_length=100,
+        output_length=115,
+    )
+
+    assert summary == {
+        "passed": False,
+        "style_score": 88.0,
+        "coverage_score": 91.0,
+        "language_match": False,
+        "tts_ready": True,
+        "unsupported_claims": ["claim one", "claim two"],
+        "missing_points": ["point one"],
+        "length_ratio": 1.15,
+    }
+
+
+def test_validation_boolean_parser_accepts_common_model_scalar_variants(settings):
+    pipeline = RewritePipeline(settings, gpt=RejectingGPT())
+
+    assert pipeline._as_bool(True, "passed") is True
+    assert pipeline._as_bool(0, "passed") is False
+    assert pipeline._as_bool("合格", "passed") is True
+    assert pipeline._as_bool("不一致", "language_match") is False
+
+    with pytest.raises(PipelineError) as error:
+        pipeline._as_bool("conditionally passed", "passed")
+    assert error.value.info.code == "GPT_OUTPUT_INVALID"
+    assert error.value.info.details == {"field": "passed", "received_type": "str"}
+
+
+@pytest.mark.asyncio
+async def test_validation_resume_uses_persisted_repaired_body(settings):
+    work_dir = settings.rewrite_temp_dir / "rewrite-job"
+    work_dir.mkdir(parents=True)
+    source_path = settings.jobs_dir / "source-job" / "source.txt"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text("Title: Source\n\n" + "a" * 100, encoding="utf-8")
+    repaired_body = "b" * 110
+    (work_dir / "repaired-001.txt").write_text(repaired_body, encoding="utf-8")
+    fake_gpt = FakeGPT("unused")
+    pipeline = RewritePipeline(settings, gpt=fake_gpt)
+    groups = [_EditGroup(indexes=[0], source="a" * 100, draft="b" * 90, body="b" * 90)]
+    brief = RewriteBrief(source_language="en", source_title="Source", source_length=100)
+
+    validated, _validator_url, _writer_url, _records = await pipeline._validate_groups(
+        _rewrite_job(source_path),
+        brief,
+        groups,
+        {"voice": "calm"},
+        {"sections": [{"id": 1}]},
+        work_dir,
+        {},
+        CHATGPT_URL,
+        lambda *_args, **_kwargs: None,
+    )
+
+    assert validated[0].body == repaired_body
+    assert not any(":repair:" in str(call["request_id"]) for call in fake_gpt.calls)
+
+
+@pytest.mark.asyncio
+async def test_exhausted_browser_failure_closes_stale_runtime(tmp_path):
+    settings = Settings(data_dir=tmp_path / "data", gpt_retries=1)
+    gpt = CrashingGPT()
+    pipeline = RewritePipeline(settings, gpt=gpt)
+
+    with pytest.raises(PipelineError) as error:
+        await pipeline._run_gpt(
+            "prompt",
+            conversation_url=None,
+            request_id=None,
+        )
+
+    assert error.value.info.code == "GPT_BROWSER_CRASHED"
+    assert gpt.close_calls == 1
 
 
 @pytest.mark.asyncio
@@ -374,6 +592,11 @@ async def test_rewrite_pipeline_uses_json_segments_for_long_source(tmp_path: Pat
     assert len(seam_validation_calls) == 1
     request_ids = [str(call["request_id"]) for call in fake_gpt.calls]
     assert request_ids.index("rewrite-job:repair:1:0") < request_ids.index("rewrite-job:seam:1:0")
+    repair_call = next(
+        call for call in fake_gpt.calls if call["request_id"] == "rewrite-job:repair:1:0"
+    )
+    assert repair_call["attachment"] is not None
+    assert "b" * 55 not in str(repair_call["prompt"])
     assert result.checkpoint["seams_total"] == 1
     assert result.checkpoint["seams_completed"] == 1
 
@@ -474,6 +697,30 @@ async def test_rewrite_pipeline_persists_validator_url_before_parsing(settings):
         == "https://chatgpt.com/c/validator-persisted"
         for _args, kwargs in updates
     )
+
+
+@pytest.mark.asyncio
+async def test_rewrite_pipeline_does_not_recover_stale_validator_request(settings):
+    source_path = settings.jobs_dir / "source-job" / "source.txt"
+    source_path.parent.mkdir(parents=True)
+    source_path.write_text(f"Title: Source title\n\n{'a' * 100}\n", encoding="utf-8")
+    fake_gpt = FakeGPT("b" * 110)
+    job = replace(
+        _rewrite_job(source_path),
+        checkpoint={"validator_url": "https://chatgpt.com/c/stale-validator"},
+    )
+    pipeline = RewritePipeline(settings, gpt=fake_gpt)
+
+    await pipeline.process(
+        job,
+        _source_job(source_path),
+        lambda *_args, **_kwargs: None,
+    )
+
+    validation_call = next(
+        call for call in fake_gpt.calls if ":validate:" in str(call["request_id"])
+    )
+    assert validation_call["conversation_url"] == CHATGPT_URL
 
 
 @pytest.mark.asyncio

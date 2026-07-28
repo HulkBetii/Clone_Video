@@ -8,12 +8,15 @@ from pathlib import Path
 
 from yt_pro_max.artifacts import parse_vtt, render_artifacts
 from yt_pro_max.config import Settings
+from yt_pro_max.errors import PipelineError
 from yt_pro_max.models import JobStage, TranscriptSource, VideoMetadata
 from yt_pro_max.transcription import WhisperTranscriber
 from yt_pro_max.url_utils import canonicalize_youtube_url
-from yt_pro_max.youtube import YouTubeClient
+from yt_pro_max.youtube import CaptionTrack, YouTubeClient
 
 LOGGER = logging.getLogger(__name__)
+JAPANESE_LANGUAGE = "ja"
+JAPANESE_AUDIO_FIRST_WARNING = "JAPANESE_AUTO_CAPTION_REPLACED_BY_WHISPER"
 
 
 @dataclass(frozen=True)
@@ -57,7 +60,8 @@ class TranscriptPipeline:
             track = self.youtube.select_caption_track(inspection, requested_language)
 
             warnings: list[str] = []
-            if track:
+            audio_first_language = _audio_first_language(track)
+            if track and audio_first_language is None:
                 update(JobStage.FETCHING_CAPTION, 10)
                 caption_path = self.youtube.download_caption(inspection, track, temporary_dir)
                 segments = parse_vtt(caption_path)
@@ -68,18 +72,31 @@ class TranscriptPipeline:
                 update(JobStage.DOWNLOADING_AUDIO, 10)
                 audio_path = self.youtube.download_audio(inspection, temporary_dir)
                 update(JobStage.LOADING_MODEL, 45)
-                result = self.transcriber.transcribe(
-                    audio_path,
-                    progress_callback=lambda progress: update(
+                transcribe_options = {
+                    "progress_callback": lambda progress: update(
                         JobStage.TRANSCRIBING,
                         45 + min(45, progress // 2),
-                    ),
-                )
+                    )
+                }
+                if audio_first_language:
+                    transcribe_options["language"] = audio_first_language
+                result = self.transcriber.transcribe(audio_path, **transcribe_options)
+                if audio_first_language and _base_language(result.language) != audio_first_language:
+                    raise PipelineError(
+                        "TRANSCRIPTION_LANGUAGE_MISMATCH",
+                        "Whisper did not return the expected Japanese transcript language.",
+                        details={
+                            "expected_language": audio_first_language,
+                            "actual_language": result.language,
+                        },
+                    )
                 segments = result.segments
                 source = TranscriptSource.WHISPER
                 language = result.language
                 language_confidence = result.language_confidence
                 warnings.extend(result.warnings)
+                if audio_first_language:
+                    warnings.append(JAPANESE_AUDIO_FIRST_WARNING)
 
             update(JobStage.RENDERING, 95)
             staged_artifact_paths = render_artifacts(
@@ -111,3 +128,17 @@ class TranscriptPipeline:
         finally:
             if temporary_dir.exists():
                 shutil.rmtree(temporary_dir)
+
+
+def _audio_first_language(track: CaptionTrack | None) -> str | None:
+    if (
+        track is not None
+        and track.source == TranscriptSource.AUTOMATIC_CAPTION
+        and _base_language(track.language) == JAPANESE_LANGUAGE
+    ):
+        return JAPANESE_LANGUAGE
+    return None
+
+
+def _base_language(language: str) -> str:
+    return language.strip().lower().split("-", 1)[0]

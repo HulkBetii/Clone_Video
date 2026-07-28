@@ -23,6 +23,7 @@ PROFILE_BUTTON_SELECTOR = (
 BOOTSTRAP_SELECTOR = "script#client-bootstrap"
 PROMPT_SELECTORS = (
     "#prompt-textarea",
+    'textarea[name="prompt-textarea"]',
     'textarea[data-id="root"]',
     '[contenteditable="true"][data-testid="composer-text-input"]',
 )
@@ -52,10 +53,10 @@ ATTACHMENT_ERROR_SELECTOR = (
     '[data-testid*="upload-error"], '
     '[role="alert"]:has-text("upload")'
 )
-ATTACHMENT_PROGRESS_SELECTOR = (
-    '[data-testid*="attachment"] [role="progressbar"], '
-    '[data-testid*="upload"] [role="progressbar"], '
-    '[data-testid*="attachment"] [aria-busy="true"]'
+COMPOSER_ATTACHMENT_TILE_SELECTOR = (
+    'form[data-type="unified-composer"] [role="group"][aria-label], '
+    'form:has(#prompt-textarea) [role="group"][aria-label], '
+    '[data-testid="composer"] [role="group"][aria-label]'
 )
 ASSISTANT_MESSAGE_SELECTOR = '[data-message-author-role="assistant"]'
 CHAT_MESSAGE_SELECTOR = "[data-message-author-role]"
@@ -102,6 +103,16 @@ class ChatGPTPlaywrightAdapter:
         self._context: Any | None = None
         self._page: Any | None = None
 
+    @property
+    def browser_running(self) -> bool:
+        return self._context is not None and self._page is not None
+
+    @property
+    def current_url(self) -> str | None:
+        if self._page is None:
+            return None
+        return str(self._page.url or self.chat_url)
+
     async def start(self) -> None:
         if self._context is not None and self._page is not None:
             return
@@ -123,13 +134,26 @@ class ChatGPTPlaywrightAdapter:
             pages = list(self._context.pages)
             self._page = pages[0] if pages else await self._context.new_page()
             await self._navigate(self.chat_url)
-            await self._require_login()
         except PipelineError:
             await self.close()
             raise
         except Exception as exc:
             await self.close()
             raise _classify_browser_exception(exc) from exc
+
+    async def open_browser(self, conversation_url: str | None = None) -> Any:
+        """Start the headed browser and optionally focus a saved ChatGPT chat.
+
+        Authentication is intentionally not checked here so the user can log in
+        manually in the opened window before calling :meth:`check_login`.
+        """
+        return await self.open_conversation(conversation_url)
+
+    async def check_login(self) -> bool:
+        """Check authentication while leaving the browser open for manual login."""
+        await self.start()
+        await self._require_login()
+        return True
 
     async def close(self) -> None:
         context, playwright = self._context, self._playwright
@@ -165,7 +189,6 @@ class ChatGPTPlaywrightAdapter:
             )
         if _normalized_url(self._page.url) != _normalized_url(target_url):
             await self._navigate(target_url)
-            await self._require_login()
         return self._page
 
     async def upload_file(self, path: Path | str) -> None:
@@ -175,7 +198,9 @@ class ChatGPTPlaywrightAdapter:
         page = await self.open_conversation()
 
         try:
-            existing_matches = await page.get_by_text(file_path.name, exact=False).count()
+            if await self._attachment_present(page, file_path.name):
+                await self._wait_for_attachment(page, file_path.name)
+                return
             direct_input = page.locator(FILE_INPUT_SELECTOR).first
             if await direct_input.count() > 0:
                 try:
@@ -185,7 +210,7 @@ class ChatGPTPlaywrightAdapter:
                     await self._upload_with_file_chooser(page, file_path)
             else:
                 await self._upload_with_file_chooser(page, file_path)
-            await self._wait_for_attachment(page, file_path.name, existing_matches)
+            await self._wait_for_attachment(page, file_path.name)
         except PipelineError:
             raise
         except Exception as exc:
@@ -202,6 +227,7 @@ class ChatGPTPlaywrightAdapter:
             raise PipelineError("GPT_OUTPUT_INVALID", "The ChatGPT prompt is empty.")
         page = await self.open_conversation()
         try:
+            await self._require_login()
             await self._ensure_thinking_mode(page)
             previous_count = await page.locator(ASSISTANT_MESSAGE_SELECTOR).count()
             composer = await self._find_visible(page, PROMPT_SELECTORS)
@@ -230,6 +256,7 @@ class ChatGPTPlaywrightAdapter:
         request_id: str | None = None,
     ) -> ChatGPTResponse:
         page = await self.open_conversation(conversation_url)
+        await self.check_login()
         if request_id:
             recovered = await self._recover_request(page, request_id)
             if recovered is not None:
@@ -317,7 +344,7 @@ class ChatGPTPlaywrightAdapter:
                 retryable=True,
             ) from exc
 
-    async def _wait_for_attachment(self, page: Any, filename: str, existing_matches: int) -> None:
+    async def _wait_for_attachment(self, page: Any, filename: str) -> None:
         deadline = asyncio.get_running_loop().time() + self.attachment_timeout_s
         while asyncio.get_running_loop().time() < deadline:
             try:
@@ -328,13 +355,9 @@ class ChatGPTPlaywrightAdapter:
                         "ChatGPT rejected the attachment.",
                         retryable=True,
                     )
-                filename_matches = page.get_by_text(filename, exact=False)
-                match_count = await filename_matches.count()
-                new_match = filename_matches.nth(existing_matches)
-                if match_count > existing_matches and await new_match.is_visible():
-                    progress = page.locator(ATTACHMENT_PROGRESS_SELECTOR)
-                    if not await self._any_visible(progress):
-                        return
+                matching_tiles = await self._matching_attachment_tiles(page, filename)
+                if matching_tiles and not any(tile["waiting"] for tile in matching_tiles):
+                    return
             except PipelineError:
                 raise
             except Exception as exc:
@@ -346,6 +369,40 @@ class ChatGPTPlaywrightAdapter:
             "The ChatGPT attachment did not finish uploading in time.",
             retryable=True,
         )
+
+    async def _attachment_present(self, page: Any, filename: str) -> bool:
+        return bool(await self._matching_attachment_tiles(page, filename))
+
+    async def _matching_attachment_tiles(
+        self,
+        page: Any,
+        filename: str,
+    ) -> list[dict[str, Any]]:
+        try:
+            tiles = await page.locator(COMPOSER_ATTACHMENT_TILE_SELECTOR).evaluate_all(
+                """nodes => nodes
+                    .filter(node => node.getClientRects().length > 0)
+                    .map(node => ({
+                        label: node.getAttribute('aria-label') || '',
+                        waiting: Boolean(node.querySelector(
+                            '.cursor-wait, [aria-busy="true"], [role="progressbar"], .animate-spin'
+                        ))
+                    }))"""
+            )
+        except Exception as exc:
+            if _looks_like_browser_failure(exc):
+                raise _classify_browser_exception(exc) from exc
+            raise PipelineError(
+                "GPT_UPLOAD_FAILED",
+                "ChatGPT attachment state could not be inspected.",
+                retryable=True,
+            ) from exc
+        return [
+            tile
+            for tile in tiles
+            if isinstance(tile, dict)
+            and _attachment_label_matches(str(tile.get("label", "")), filename)
+        ]
 
     async def _send(self, page: Any, composer: Any) -> None:
         button = await self._find_visible(page, SEND_BUTTON_SELECTORS, require_enabled=True)
@@ -418,7 +475,7 @@ class ChatGPTPlaywrightAdapter:
                 messages = page.locator(ASSISTANT_MESSAGE_SELECTOR)
                 count = await messages.count()
                 if count:
-                    text = (await messages.nth(count - 1).inner_text()).strip()
+                    text = await self._assistant_text(messages.nth(count - 1))
                     latest_text = text or latest_text
                     if TRANSIENT_RESPONSE_PATTERN.fullmatch(text):
                         stable_count = 0
@@ -505,10 +562,17 @@ class ChatGPTPlaywrightAdapter:
     async def _read_messages(self, page: Any) -> list[dict[str, str]]:
         try:
             raw_messages = await page.locator(CHAT_MESSAGE_SELECTOR).evaluate_all(
-                """nodes => nodes.map(node => ({
-                    role: node.getAttribute('data-message-author-role') || '',
-                    text: (node.innerText || node.textContent || '').trim()
-                }))"""
+                """nodes => nodes.map(node => {
+                    const role = node.getAttribute('data-message-author-role') || '';
+                    const content = node.cloneNode(true);
+                    if (role === 'assistant') {
+                        content.querySelectorAll('button').forEach(button => button.remove());
+                    }
+                    return {
+                        role,
+                        text: (content.innerText || content.textContent || '').trim()
+                    };
+                })"""
             )
         except Exception as exc:
             raise _classify_browser_exception(exc) from exc
@@ -517,6 +581,19 @@ class ChatGPTPlaywrightAdapter:
             for item in raw_messages
             if isinstance(item, dict)
         ]
+
+    async def _assistant_text(self, message: Any) -> str:
+        try:
+            text = await message.evaluate(
+                """node => {
+                    const content = node.cloneNode(true);
+                    content.querySelectorAll('button').forEach(button => button.remove());
+                    return (content.innerText || content.textContent || '').trim();
+                }"""
+            )
+        except Exception as exc:
+            raise _classify_browser_exception(exc) from exc
+        return str(text).strip()
 
     async def _find_visible(
         self,
@@ -606,3 +683,11 @@ def _is_chatgpt_url(url: str) -> bool:
 
 def _normalized_url(url: str) -> str:
     return url.rstrip("/")
+
+
+def _attachment_label_matches(label: str, filename: str) -> bool:
+    if label == filename:
+        return True
+    path = Path(filename)
+    renamed_pattern = rf"^{re.escape(path.stem)}\(\d+\){re.escape(path.suffix)}$"
+    return re.fullmatch(renamed_pattern, label) is not None

@@ -1,0 +1,19 @@
+.library { overflow: hidden; }
+.toolbar { display: flex; justify-content: space-between; gap: 18px; padding: 18px 20px; border-bottom: 1px solid var(--line); }
+.search { flex: 1; max-width: 350px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border: 1px solid var(--line); border-radius: 11px; background: rgba(255,255,255,.35); }
+.search input { width: 100%; height: 39px; border: 0; outline: 0; color: var(--ink); background: transparent; font-size: 12px; }
+.filters { display: flex; align-items: center; gap: 3px; overflow-x: auto; }
+.filters > svg { margin-right: 5px; color: var(--muted); flex: 0 0 auto; }
+.filters button { padding: 7px 10px; border: 0; border-radius: 9px; color: var(--muted); background: transparent; font-size: 11px; white-space: nowrap; }
+.filters button:hover, .filters button.active { color: var(--ink); background: var(--paper-deep); }
+.count { display: flex; justify-content: space-between; gap: 18px; padding: 12px 21px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 10px; letter-spacing: .05em; text-transform: uppercase; }
+.selectionTools { display: flex; align-items: center; gap: 11px; }
+.selectionTools button { display: inline-flex; align-items: center; gap: 5px; padding: 0; border: 0; color: var(--coral-dark); background: transparent; font-size: 10px; text-transform: uppercase; }
+.selectionTools button:hover { color: var(--ink); }
+.selectionTools .deleteButton { color: #a4483f; }
+.confirmation { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 15px 21px; border-bottom: 1px solid #d69776; color: #663a29; background: #f4dfcf; }
+.confirmation p { margin: 4px 0 0; color: #825b48; font-size: 11px; }
+.confirmationActions { display: flex; gap: 8px; flex: 0 0 auto; }
+.loading { display: grid; gap: 1px; padding: 10px; }
+.notice { padding: 22px; }
+@media (max-width: 760px) { .toolbar { align-items: stretch; flex-direction: column; }.search { max-width: none; }.filters { padding-bottom: 3px; }.count { align-items: flex-start; flex-direction: column; gap: 10px; }.selectionTools { flex-wrap: wrap; }.confirmation { align-items: flex-start; flex-direction: column; }.confirmationActions { width: 100%; }.confirmationActions .button { flex: 1; } }

@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from yt_pro_max.models import JobStatus
+from yt_pro_max.models import JobStatus, RewriteStage
 from yt_pro_max.repository import JobRepository
 from yt_pro_max.rewrite_repository import RewriteJobRepository
 from yt_pro_max.rewrite_worker import RewriteWorker
@@ -50,6 +50,35 @@ class CompletingPipeline:
             checkpoint={"completed": True},
             work_files={},
         )
+
+
+class ResumablePipeline(CompletingPipeline):
+    def __init__(self, settings):
+        super().__init__(settings)
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.seen_checkpoint = None
+
+    async def process(self, job, source_job, update):
+        self.seen_checkpoint = job.checkpoint
+        self.started.set()
+        await self.release.wait()
+        result = await super().process(job, source_job, update)
+        values = vars(result)
+        values.update(
+            checkpoint={**(job.checkpoint or {}), "completed": True},
+            validation={
+                "passed": True,
+                "style_score": 91,
+                "coverage_score": 93,
+                "language_match": True,
+                "tts_ready": True,
+                "unsupported_claims": [],
+                "missing_points": [],
+                "length_ratio": 1.25,
+            },
+        )
+        return SimpleNamespace(**values)
 
 
 class FailFirstGetRepository:
@@ -168,3 +197,49 @@ async def test_worker_continues_after_repository_failure(settings):
     assert failed.error["code"] == "INTERNAL_ERROR"
     assert completed.progress == 100
     assert pipeline.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_resume_reuses_failed_job_and_preserves_checkpoint(settings):
+    transcript_repository = JobRepository(settings.database_path)
+    transcript_repository.initialize()
+    source = _create_source(transcript_repository)
+    rewrite_repository = RewriteJobRepository(settings.database_path)
+    rewrite_repository.initialize()
+    rewrite = _create_rewrite(rewrite_repository, "rewrite-resume", source.id)
+    rewrite_repository.update_job(
+        rewrite.id,
+        status=JobStatus.FAILED,
+        stage=RewriteStage.VALIDATING,
+        progress=84,
+        checkpoint_json={"validation_completed": 1},
+        conversation_url="https://chatgpt.com/c/saved",
+        error_json={"code": "GPT_LOGIN_REQUIRED", "message": "Login required"},
+    )
+    pipeline = ResumablePipeline(settings)
+    worker = RewriteWorker(rewrite_repository, transcript_repository, pipeline)
+    await worker.start()
+
+    try:
+        resumed = await worker.resume(rewrite.id)
+        assert resumed.id == rewrite.id
+        assert resumed.error is None
+        await asyncio.wait_for(pipeline.started.wait(), timeout=1)
+        assert worker.active_job_id == rewrite.id
+        assert worker.queue_depth == 0
+        assert pipeline.seen_checkpoint == {"validation_completed": 1}
+
+        pipeline.release.set()
+        completed = await _wait_for_status(
+            rewrite_repository,
+            rewrite.id,
+            JobStatus.COMPLETED,
+        )
+        assert completed.checkpoint == {
+            "validation_completed": 1,
+            "completed": True,
+        }
+        assert completed.validation is not None
+        assert completed.validation["style_score"] == 91
+    finally:
+        await worker.stop()

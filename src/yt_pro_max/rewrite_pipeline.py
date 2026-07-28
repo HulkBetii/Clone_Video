@@ -57,6 +57,7 @@ class RewritePipelineOutput:
     conversation_url: str | None
     checkpoint: dict[str, Any]
     work_files: dict[str, str]
+    validation: dict[str, Any]
 
 
 @dataclass
@@ -71,6 +72,9 @@ class _EditGroup:
 class _ValidationDecision:
     passed: bool
     language_match: bool
+    style_score: float
+    coverage_score: float
+    tts_ready: bool
     unsupported_claims: list[str]
     missing_points: list[str]
     repairs: list[str]
@@ -98,11 +102,22 @@ class RewritePipeline:
     async def close(self) -> None:
         await self.gpt.close()
 
+    async def open_browser(self, conversation_url: str | None = None) -> str:
+        page = await self.gpt.open_browser(conversation_url)
+        return str(page.url or CHATGPT_URL)
+
+    async def check_login(self) -> bool:
+        return await self.gpt.check_login()
+
+    async def close_browser(self) -> None:
+        await self.gpt.close()
+
     def health(self) -> dict[str, Any]:
         return {
             "profile_id": self.settings.gpt_profile_id,
             "profile_exists": self.settings.gpt_profile_dir.is_dir(),
-            "browser_running": getattr(self.gpt, "_context", None) is not None,
+            "browser_running": bool(getattr(self.gpt, "browser_running", False)),
+            "conversation_url": getattr(self.gpt, "current_url", None),
             "worker_concurrency": 1,
         }
 
@@ -249,7 +264,7 @@ class RewritePipeline:
             writer_url,
             update,
         )
-        groups, validator_url, writer_url = await self._validate_groups(
+        groups, validator_url, writer_url, validation_records = await self._validate_groups(
             job,
             brief,
             groups,
@@ -326,6 +341,12 @@ class RewritePipeline:
         )
         checkpoint.update({"completed": True, "sections_completed": len(chunks)})
         warnings = list(dict.fromkeys(final_check.warnings))
+        validation = self._aggregate_validation(
+            validation_records,
+            source_length=final_check.source_length,
+            output_length=final_check.output_length,
+        )
+        self._write_json(work_dir / "validation-summary.json", validation)
         return RewritePipelineOutput(
             artifact_path=artifact_path,
             title=final_check.title,
@@ -337,6 +358,7 @@ class RewritePipeline:
             conversation_url=writer_url,
             checkpoint=checkpoint,
             work_files=self._work_files(work_dir),
+            validation=validation,
         )
 
     async def _analyze_chunks(
@@ -513,14 +535,14 @@ class RewritePipeline:
                 continue
             group_brief = self._chunk_brief(brief, group.source)
             group_outline = {"sections": [outline["sections"][index] for index in group.indexes]}
+            draft_path = work_dir / f"draft-{group_index:03}.txt"
+            self._write_text(draft_path, group.draft)
             prompt = build_final_edit_prompt(
                 group_brief,
                 style_profile=style_profile,
                 outline=group_outline,
-                draft=group.draft,
+                attachment_name=draft_path.name,
             )
-            draft_path = work_dir / f"draft-{group_index:03}.txt"
-            self._write_text(draft_path, group.draft)
             request_id = f"{job.id}:edit:{group_index}"
             response = await self._run_gpt(
                 self._tag_prompt(request_id, prompt),
@@ -696,8 +718,7 @@ class RewritePipeline:
                         seam_brief,
                         style_profile=style_profile,
                         outline=seam_outline,
-                        source_text=f"{previous_source_tail}\n\n{next_source_head}",
-                        draft=f"{revised_previous_tail}\n\n{revised_next_head}",
+                        attachment_name=validation_path.name,
                     )
                     validation_id = f"{job.id}:validate:seam:{seam_index}:{attempt}"
                     validation_response = await self._run_gpt(
@@ -774,13 +795,22 @@ class RewritePipeline:
         checkpoint: dict[str, Any],
         writer_url: str,
         update: ProgressCallback,
-    ) -> tuple[list[_EditGroup], str, str]:
-        validator_url = str(checkpoint.get("validator_url") or CHATGPT_URL)
+    ) -> tuple[list[_EditGroup], str, str, list[dict[str, Any]]]:
+        # A crashed request can leave a marker without a recoverable response. Resume validation
+        # in a fresh conversation while keeping completed validation files as the checkpoint.
+        validator_url = CHATGPT_URL
+        validation_records: list[dict[str, Any]] = []
         for group_index, group in enumerate(groups, 1):
             validated_path = work_dir / f"validated-{group_index:03}.txt"
+            summary_path = work_dir / f"validation-summary-{group_index:03}.json"
             if validated_path.is_file():
                 group.body = validated_path.read_text(encoding="utf-8")
-                continue
+                if summary_path.is_file():
+                    validation_records.append(self._read_json(summary_path))
+                    continue
+            repaired_path = work_dir / f"repaired-{group_index:03}.txt"
+            if repaired_path.is_file():
+                group.body = repaired_path.read_text(encoding="utf-8")
             group_brief = self._chunk_brief(brief, group.source)
             group_outline = {"sections": [outline["sections"][index] for index in group.indexes]}
             for attempt in range(self.settings.rewrite_repair_attempts + 1):
@@ -800,8 +830,7 @@ class RewritePipeline:
                     group_brief,
                     style_profile=style_profile,
                     outline=group_outline,
-                    source_text=group.source,
-                    draft=group.body,
+                    attachment_name=validation_file.name,
                 )
                 request_id = f"{job.id}:validate:{group_index}:{attempt}"
                 response = await self._run_gpt(
@@ -822,40 +851,8 @@ class RewritePipeline:
                     completed=sum(len(item.indexes) for item in groups[: group_index - 1]),
                     total=sum(len(item.indexes) for item in groups),
                 )
-                verdict = self._parse_structured(
-                    response.text,
-                    (
-                        "passed",
-                        "language_match",
-                        "style_score",
-                        "coverage_score",
-                        "tts_ready",
-                        "unsupported_claims",
-                        "missing_points",
-                        "targeted_repairs",
-                    ),
-                )
-                language_match = self._as_bool(verdict["language_match"])
-                unsupported_claims = self._as_text_list(
-                    verdict["unsupported_claims"], "unsupported_claims"
-                )
-                missing_points = self._as_text_list(verdict["missing_points"], "missing_points")
-                targeted_repairs = self._as_text_list(
-                    verdict["targeted_repairs"], "targeted_repairs"
-                )
-                passed = (
-                    self._as_bool(verdict["passed"])
-                    and language_match
-                    and self._as_bool(verdict["tts_ready"])
-                    and self._as_score(verdict["style_score"])
-                    >= self.settings.rewrite_validation_score
-                    and self._as_score(verdict["coverage_score"])
-                    >= self.settings.rewrite_validation_score
-                    and not unsupported_claims
-                    and not missing_points
-                    and not local_errors
-                )
-                if passed:
+                decision = self._validation_decision(response.text, local_errors)
+                if decision.passed:
                     break
                 if attempt >= self.settings.rewrite_repair_attempts:
                     if local_errors:
@@ -865,34 +862,44 @@ class RewritePipeline:
                         "The rewritten script did not pass style and content validation.",
                         details={
                             "group": group_index,
-                            "language_match": language_match,
-                            "unsupported_claims": unsupported_claims,
-                            "missing_points": missing_points,
+                            "language_match": decision.language_match,
+                            "unsupported_claims": decision.unsupported_claims,
+                            "missing_points": decision.missing_points,
                             "local_errors": local_errors,
                         },
                     )
-                repairs = [*targeted_repairs, *local_errors]
-                if not language_match:
-                    repairs.append("Restore the source language throughout the draft.")
-                if unsupported_claims:
-                    repairs.append("Remove unsupported claims: " + "; ".join(unsupported_claims))
-                if missing_points:
-                    repairs.append("Restore missing points: " + "; ".join(missing_points))
-                if not repairs:
-                    repairs.append("Resolve every failed validator rubric item.")
-                repair_prompt = (
-                    build_final_edit_prompt(
-                        group_brief,
-                        style_profile=style_profile,
-                        outline=group_outline,
-                        draft=group.body,
+                repairs = [
+                    repair
+                    for repair in decision.repairs
+                    if repair not in {"OUTPUT_TOO_SHORT", "OUTPUT_TOO_LONG"}
+                ]
+                source_length = normalized_length(group.source)
+                output_length = normalized_length(group.body)
+                minimum, target, maximum = self.length_policy.bounds(source_length)
+                if "OUTPUT_TOO_SHORT" in local_errors:
+                    repairs.append(
+                        f"Expand the draft from {output_length} to at least {minimum} "
+                        f"normalized characters (target about {target}); add faithful detail "
+                        "without removing covered points or inventing facts."
                     )
-                    + f"\nTARGETED REPAIRS\n{json.dumps(repairs, ensure_ascii=False)}"
-                )
+                if "OUTPUT_TOO_LONG" in local_errors:
+                    repairs.append(
+                        f"Compress the draft from {output_length} to at most {maximum} "
+                        "normalized characters while preserving every required point."
+                    )
+                repair_path = work_dir / f"repair-input-{group_index:03}-{attempt:02}.txt"
+                self._write_text(repair_path, group.body)
+                repair_prompt = build_final_edit_prompt(
+                    group_brief,
+                    style_profile=style_profile,
+                    outline=group_outline,
+                    attachment_name=repair_path.name,
+                ) + f"\nTARGETED REPAIRS\n{json.dumps(repairs, ensure_ascii=False)}"
                 repair_id = f"{job.id}:repair:{group_index}:{attempt}"
                 repaired = await self._run_gpt(
                     self._tag_prompt(repair_id, repair_prompt),
-                    conversation_url=writer_url,
+                    attachment=repair_path,
+                    conversation_url=CHATGPT_URL,
                     request_id=repair_id,
                 )
                 writer_url = repaired.conversation_url
@@ -906,10 +913,38 @@ class RewritePipeline:
                     completed=sum(len(item.indexes) for item in groups[: group_index - 1]),
                     total=sum(len(item.indexes) for item in groups),
                 )
-                group.body = remove_duplicate_transitions(
+                candidate_body = remove_duplicate_transitions(
                     str(self._parse_structured(repaired.text, ("body",))["body"])
                 )
-                self._write_text(work_dir / f"repaired-{group_index:03}.txt", group.body)
+                current_check = validate_rewrite(
+                    title=brief.source_title,
+                    body=group.body,
+                    source_body=group.source,
+                    length_policy=self.length_policy,
+                )
+                candidate_check = validate_rewrite(
+                    title=brief.source_title,
+                    body=candidate_body,
+                    source_body=group.source,
+                    length_policy=self.length_policy,
+                )
+                if (
+                    any(
+                        error in {"OUTPUT_TOO_SHORT", "OUTPUT_TOO_LONG"}
+                        for error in candidate_check.errors
+                    )
+                    and not any(
+                        error in {"OUTPUT_TOO_SHORT", "OUTPUT_TOO_LONG"}
+                        for error in current_check.errors
+                    )
+                ):
+                    # Do not replace a length-valid draft with a shorter/longer repair candidate.
+                    candidate_body = group.body
+                group.body = candidate_body
+                self._write_text(repaired_path, group.body)
+            validation_record = self._validation_record(decision, group_index)
+            self._write_json(summary_path, validation_record)
+            validation_records.append(validation_record)
             self._write_text(validated_path, group.body)
             checkpoint["validation_completed"] = group_index
             checkpoint["validator_url"] = validator_url
@@ -923,7 +958,7 @@ class RewritePipeline:
                 completed=sum(len(item.indexes) for item in groups[:group_index]),
                 total=sum(len(item.indexes) for item in groups),
             )
-        return groups, validator_url, writer_url
+        return groups, validator_url, writer_url, validation_records
 
     async def _create_title(
         self,
@@ -1009,14 +1044,14 @@ class RewritePipeline:
                 )
             except PipelineError as error:
                 last_error = error
-                if not error.info.retryable or attempt + 1 >= self.settings.gpt_retries:
-                    raise
                 current_page = getattr(self.gpt, "_page", None)
                 current_url = getattr(current_page, "url", None)
                 if isinstance(current_url, str) and current_url.startswith("https://chatgpt.com"):
                     conversation_url = current_url
                 if error.info.code == "GPT_BROWSER_CRASHED":
                     await self.gpt.close()
+                if not error.info.retryable or attempt + 1 >= self.settings.gpt_retries:
+                    raise
                 await asyncio.sleep(min(2**attempt, 8))
         if last_error is not None:
             raise last_error
@@ -1344,16 +1379,53 @@ class RewritePipeline:
             if temporary_path is not None and temporary_path.exists():
                 temporary_path.unlink()
 
-    def _as_bool(self, value: Any) -> bool:
+    def _as_bool(self, value: Any, field: str) -> bool:
         if isinstance(value, bool):
             return value
+        if isinstance(value, int) and value in {0, 1}:
+            return bool(value)
         if isinstance(value, str):
             normalized = value.strip().lower()
-            if normalized in {"true", "yes", "pass", "passed"}:
+            if normalized in {
+                "true",
+                "yes",
+                "y",
+                "1",
+                "pass",
+                "passed",
+                "ok",
+                "ready",
+                "match",
+                "matched",
+                "はい",
+                "合格",
+                "一致",
+                "準備完了",
+            }:
                 return True
-            if normalized in {"false", "no", "fail", "failed"}:
+            if normalized in {
+                "false",
+                "no",
+                "n",
+                "0",
+                "fail",
+                "failed",
+                "ng",
+                "not ready",
+                "not_ready",
+                "mismatch",
+                "unmatched",
+                "いいえ",
+                "不合格",
+                "不一致",
+                "未準備",
+            }:
                 return False
-        raise PipelineError("GPT_OUTPUT_INVALID", "GPT validation boolean is invalid.")
+        raise PipelineError(
+            "GPT_OUTPUT_INVALID",
+            f"GPT validation boolean for '{field}' is invalid.",
+            details={"field": field, "received_type": type(value).__name__},
+        )
 
     def _validation_decision(self, response: str, local_errors: list[str]) -> _ValidationDecision:
         verdict = self._parse_structured(
@@ -1369,16 +1441,19 @@ class RewritePipeline:
                 "targeted_repairs",
             ),
         )
-        language_match = self._as_bool(verdict["language_match"])
+        language_match = self._as_bool(verdict["language_match"], "language_match")
+        style_score = self._as_score(verdict["style_score"])
+        coverage_score = self._as_score(verdict["coverage_score"])
+        tts_ready = self._as_bool(verdict["tts_ready"], "tts_ready")
         unsupported_claims = self._as_text_list(verdict["unsupported_claims"], "unsupported_claims")
         missing_points = self._as_text_list(verdict["missing_points"], "missing_points")
         targeted_repairs = self._as_text_list(verdict["targeted_repairs"], "targeted_repairs")
         passed = (
-            self._as_bool(verdict["passed"])
+            self._as_bool(verdict["passed"], "passed")
             and language_match
-            and self._as_bool(verdict["tts_ready"])
-            and self._as_score(verdict["style_score"]) >= self.settings.rewrite_validation_score
-            and self._as_score(verdict["coverage_score"]) >= self.settings.rewrite_validation_score
+            and tts_ready
+            and style_score >= self.settings.rewrite_validation_score
+            and coverage_score >= self.settings.rewrite_validation_score
             and not unsupported_claims
             and not missing_points
             and not local_errors
@@ -1395,10 +1470,66 @@ class RewritePipeline:
         return _ValidationDecision(
             passed=passed,
             language_match=language_match,
+            style_score=style_score,
+            coverage_score=coverage_score,
+            tts_ready=tts_ready,
             unsupported_claims=unsupported_claims,
             missing_points=missing_points,
             repairs=repairs,
         )
+
+    def _validation_record(
+        self,
+        decision: _ValidationDecision,
+        section: int,
+    ) -> dict[str, Any]:
+        return {
+            "section": section,
+            "passed": decision.passed,
+            "style_score": decision.style_score,
+            "coverage_score": decision.coverage_score,
+            "language_match": decision.language_match,
+            "tts_ready": decision.tts_ready,
+            "unsupported_claims": decision.unsupported_claims,
+            "missing_points": decision.missing_points,
+        }
+
+    def _aggregate_validation(
+        self,
+        records: list[dict[str, Any]],
+        *,
+        source_length: int,
+        output_length: int,
+    ) -> dict[str, Any]:
+        style_scores = [self._as_score(record["style_score"]) for record in records]
+        coverage_scores = [self._as_score(record["coverage_score"]) for record in records]
+        unsupported_claims = list(
+            dict.fromkeys(
+                issue
+                for record in records
+                for issue in self._as_text_list(
+                    record.get("unsupported_claims", []),
+                    "unsupported_claims",
+                )
+            )
+        )
+        missing_points = list(
+            dict.fromkeys(
+                issue
+                for record in records
+                for issue in self._as_text_list(record.get("missing_points", []), "missing_points")
+            )
+        )
+        return {
+            "passed": all(bool(record.get("passed")) for record in records),
+            "style_score": min(style_scores) if style_scores else 100.0,
+            "coverage_score": min(coverage_scores) if coverage_scores else 100.0,
+            "language_match": all(bool(record.get("language_match")) for record in records),
+            "tts_ready": all(bool(record.get("tts_ready")) for record in records),
+            "unsupported_claims": unsupported_claims,
+            "missing_points": missing_points,
+            "length_ratio": output_length / source_length if source_length else 0.0,
+        }
 
     def _parse_structured(self, response: str, required: tuple[str, ...]) -> dict[str, Any]:
         try:

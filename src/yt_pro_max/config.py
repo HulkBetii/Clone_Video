@@ -15,11 +15,12 @@ class Settings(BaseSettings):
     data_dir: Path = Path("data")
     max_duration_seconds: int = 6 * 60 * 60
     youtube_retries: int = 3
-    pipeline_version: str = "1"
+    pipeline_version: str = "2"
     whisper_model: str = "turbo"
     whisper_device: str = "auto"
     gpu_compute_type: str = "float16"
     cpu_compute_type: str = "int8"
+    cuda_dll_dir: Path | None = None
     rewrite_pipeline_version: str = "1"
     rewrite_prompt_version: str = "1"
     rewrite_chunk_max_chars: int = 25_000

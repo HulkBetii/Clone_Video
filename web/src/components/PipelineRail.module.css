@@ -1,0 +1,14 @@
+.rail { display: grid; grid-template-columns: minmax(0,1fr) 55px minmax(0,1fr) 55px minmax(0,1fr); align-items: center; }
+.node { display: grid; grid-template-columns: 38px 1fr; align-items: center; gap: 11px; min-width: 0; opacity: .58; }
+.node.active, .node.complete { opacity: 1; }
+.icon { width: 38px; height: 38px; display: grid; place-items: center; border-radius: 50%; color: var(--muted); border: 1px solid var(--line); background: var(--paper-raised); }
+.active .icon { color: white; border-color: var(--coral); background: var(--coral); box-shadow: 0 0 0 5px rgba(220,91,67,.12); }
+.complete .icon { color: white; border-color: var(--forest); background: var(--forest); }
+.node small, .node strong, .node div > span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.node small { color: var(--muted); font-size: 8px; letter-spacing: .1em; text-transform: uppercase; }
+.node strong { margin-top: 3px; font: 600 16px var(--serif); }
+.node div > span { margin-top: 2px; color: var(--muted); font-size: 10px; }
+.line { height: 1px; margin: 0 12px; background: var(--line); }
+.line.complete { background: var(--forest); }
+.disabled { opacity: .36; }
+@media (max-width: 760px) { .rail { grid-template-columns: 1fr; gap: 0; }.line { width: 1px; height: 24px; margin: 4px 0 4px 18px; }.node { grid-template-columns: 38px 1fr; } }

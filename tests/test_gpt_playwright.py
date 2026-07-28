@@ -32,6 +32,7 @@ class FakeLocator:
         self.filled = ""
         self.pressed = ""
         self.files: list[str] = []
+        self.evaluate_script = ""
 
     @property
     def first(self) -> FakeLocator:
@@ -78,6 +79,11 @@ class FakeLocator:
     async def inner_text(self, timeout: int | None = None) -> str:
         del timeout
         self._raise_if_needed()
+        return self._text
+
+    async def evaluate(self, script: str) -> str:
+        self._raise_if_needed()
+        self.evaluate_script = script
         return self._text
 
     def _raise_if_needed(self) -> None:
@@ -127,18 +133,10 @@ class SequenceTextLocator(FakeLocator):
             return self.values.pop(0)
         return self.values[0]
 
-
-class SequencedVisibleLocator(FakeLocator):
-    def __init__(self, values: list[bool]) -> None:
-        super().__init__(count=1)
-        self.values = values
-        self.calls = 0
-
-    async def is_visible(self, timeout: int | None = None) -> bool:
-        del timeout
-        value = self.values[min(self.calls, len(self.values) - 1)]
-        self.calls += 1
-        return value
+    async def evaluate(self, _script: str) -> str:
+        if len(self.values) > 1:
+            return self.values.pop(0)
+        return self.values[0]
 
 
 class FakeMessagesLocator(FakeLocator):
@@ -151,6 +149,21 @@ class FakeMessagesLocator(FakeLocator):
             self.page.message_snapshot_index += 1
             return self.page.message_snapshots[index]
         return self.page.messages
+
+
+class FakeAttachmentTilesLocator(FakeLocator):
+    def __init__(self, page: FakePage) -> None:
+        self.page = page
+
+    async def evaluate_all(self, _script: str) -> list[dict[str, Any]]:
+        if self.page.attachment_tile_snapshots:
+            index = min(
+                self.page.attachment_tile_snapshot_index,
+                len(self.page.attachment_tile_snapshots) - 1,
+            )
+            self.page.attachment_tile_snapshot_index += 1
+            return self.page.attachment_tile_snapshots[index]
+        return self.page.attachment_tiles
 
 
 class FakeChooser:
@@ -198,10 +211,12 @@ class FakePage:
         self.profile = FakeLocator(count=1, visible=logged_in)
         self.file_input = FakeLocator()
         self.attach_button = FakeLocator()
-        self.attachment_name = FakeLocator()
+        self.attachment_tiles: list[dict[str, Any]] = []
+        self.attachment_tile_snapshots: list[list[dict[str, Any]]] = []
+        self.attachment_tile_snapshot_index = 0
         self.attachment_error = FakeLocator()
-        self.attachment_progress = FakeLocator()
         self.prompt = FakeLocator(count=1, visible=True)
+        self.prompt_selector = gpt_module.PROMPT_SELECTORS[0]
         self.send_button = FakeLocator(
             count=1,
             visible=True,
@@ -229,8 +244,8 @@ class FakePage:
             return self.file_input
         if selector == gpt_module.ATTACHMENT_ERROR_SELECTOR:
             return self.attachment_error
-        if selector == gpt_module.ATTACHMENT_PROGRESS_SELECTOR:
-            return self.attachment_progress
+        if selector == gpt_module.COMPOSER_ATTACHMENT_TILE_SELECTOR:
+            return FakeAttachmentTilesLocator(self)
         if selector == gpt_module.ASSISTANT_MESSAGE_SELECTOR:
             return FakeAssistantLocator(self)
         if selector == gpt_module.CHAT_MESSAGE_SELECTOR:
@@ -238,7 +253,7 @@ class FakePage:
         if selector == gpt_module.STOP_BUTTON_SELECTOR:
             return self.stop_button
         if selector in gpt_module.PROMPT_SELECTORS:
-            return self.prompt if selector == gpt_module.PROMPT_SELECTORS[0] else FakeLocator()
+            return self.prompt if selector == self.prompt_selector else FakeLocator()
         if selector in gpt_module.SEND_BUTTON_SELECTORS:
             return (
                 self.send_button
@@ -253,10 +268,6 @@ class FakePage:
             )
         return FakeLocator()
 
-    def get_by_text(self, _text: str, *, exact: bool) -> FakeLocator:
-        del exact
-        return self.attachment_name
-
     def expect_file_chooser(self, *, timeout: int) -> FakeChooserContext:
         del timeout
         return FakeChooserContext(self.chooser)
@@ -265,8 +276,7 @@ class FakePage:
         self.assistant_messages.append(self.next_response)
 
     def _complete_attachment(self) -> None:
-        self.attachment_name._count += 1
-        self.attachment_name._visible = True
+        self.attachment_tiles = [{"label": "source.txt", "waiting": False}]
 
 
 class FakeContext:
@@ -372,18 +382,24 @@ async def test_start_rejects_missing_or_locked_profile(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_start_requires_existing_login(tmp_path, monkeypatch):
+async def test_open_browser_allows_manual_login_then_check_keeps_window_open(
+    tmp_path, monkeypatch
+):
     profile = tmp_path / "profile"
     profile.mkdir()
     context = FakeContext(FakePage(logged_in=False))
     playwright = FakePlaywright(FakeChromium(context))
     monkeypatch.setattr(gpt_module, "_load_async_playwright", playwright_loader(playwright))
 
+    adapter = ChatGPTPlaywrightAdapter(profile)
+    await adapter.open_browser()
+
     with pytest.raises(PipelineError) as error:
-        await ChatGPTPlaywrightAdapter(profile).start()
+        await adapter.check_login()
 
     assert error.value.info.code == "GPT_LOGIN_REQUIRED"
-    assert context.closed
+    assert not context.closed
+    await adapter.close()
 
 
 @pytest.mark.asyncio
@@ -415,9 +431,9 @@ async def test_upload_falls_back_to_file_chooser(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_upload_requires_a_new_attachment_chip_for_reused_filename(tmp_path):
+async def test_upload_retry_reuses_ready_renamed_attachment(tmp_path):
     page = FakePage()
-    page.attachment_name = FakeLocator(count=1, visible=True)
+    page.attachment_tiles = [{"label": "source(3).txt", "waiting": False}]
     page.file_input = FakeLocator(count=1, click_callback=page._complete_attachment)
     adapter = running_adapter(tmp_path, page)
     attachment = tmp_path / "source.txt"
@@ -425,38 +441,58 @@ async def test_upload_requires_a_new_attachment_chip_for_reused_filename(tmp_pat
 
     await adapter.upload_file(attachment)
 
-    assert page.attachment_name._count == 2
+    assert page.file_input.files == []
+    assert page.attachment_tiles == [{"label": "source(3).txt", "waiting": False}]
 
 
 @pytest.mark.asyncio
-async def test_upload_does_not_accept_only_an_old_attachment_chip(tmp_path):
+async def test_upload_waits_for_exact_cursor_wait_tile_to_be_ready(tmp_path):
     page = FakePage()
-    page.attachment_name = FakeLocator(count=1, visible=True)
-    page.file_input = FakeLocator(count=1)
-    adapter = running_adapter(tmp_path, page, attachment_timeout_s=0.001)
-    attachment = tmp_path / "source.txt"
-    attachment.write_text("source", encoding="utf-8")
 
-    with pytest.raises(PipelineError) as error:
-        await adapter.upload_file(attachment)
+    def start_upload() -> None:
+        page.attachment_tile_snapshots = [
+            [{"label": "source.txt", "waiting": True}],
+            [{"label": "source.txt", "waiting": False}],
+        ]
 
-    assert error.value.info.code == "GPT_UPLOAD_FAILED"
-
-
-@pytest.mark.asyncio
-async def test_upload_waits_until_attachment_progress_disappears(tmp_path):
-    page = FakePage()
-    page.file_input = FakeLocator(count=1, click_callback=page._complete_attachment)
-    page.attachment_name = FakeLocator(count=1, visible=True)
-    progress = SequencedVisibleLocator([True, False])
-    page.attachment_progress = progress
+    page.file_input = FakeLocator(count=1, click_callback=start_upload)
     adapter = running_adapter(tmp_path, page)
     attachment = tmp_path / "source.txt"
     attachment.write_text("source", encoding="utf-8")
 
     await adapter.upload_file(attachment)
 
-    assert progress.calls == 2
+    assert page.attachment_tile_snapshot_index == 2
+    assert page.file_input.files == [str(attachment)]
+
+
+@pytest.mark.asyncio
+async def test_upload_recognizes_renamed_ready_tile_after_processing(tmp_path):
+    page = FakePage()
+
+    def start_upload() -> None:
+        page.attachment_tile_snapshots = [
+            [{"label": "source.txt", "waiting": True}],
+            [{"label": "source(3).txt", "waiting": False}],
+        ]
+
+    page.file_input = FakeLocator(count=1, click_callback=start_upload)
+    adapter = running_adapter(tmp_path, page)
+    attachment = tmp_path / "source.txt"
+    attachment.write_text("source", encoding="utf-8")
+
+    await adapter.upload_file(attachment)
+
+    assert page.attachment_tile_snapshot_index == 2
+
+
+def test_attachment_label_match_rejects_remove_button_label():
+    assert gpt_module._attachment_label_matches("source.txt", "source.txt")
+    assert gpt_module._attachment_label_matches("source(12).txt", "source.txt")
+    assert not gpt_module._attachment_label_matches(
+        "Remove file 1: source(12).txt",
+        "source.txt",
+    )
 
 
 @pytest.mark.asyncio
@@ -471,6 +507,31 @@ async def test_send_prompt_waits_for_new_stable_response(tmp_path):
     assert page.send_button.clicked
     assert response.text == "Rewritten script"
     assert response.conversation_url == "https://chatgpt.com/c/demo"
+
+
+@pytest.mark.asyncio
+async def test_send_prompt_accepts_navigation_fallback_textarea(tmp_path):
+    page = FakePage()
+    page.prompt_selector = 'textarea[name="prompt-textarea"]'
+    adapter = running_adapter(tmp_path, page)
+
+    response = await adapter.send_prompt("Validate this rewrite")
+
+    assert page.prompt.filled == "Validate this rewrite"
+    assert page.send_button.clicked
+    assert response.text == "Rewritten script"
+
+
+@pytest.mark.asyncio
+async def test_assistant_text_excludes_interactive_citation_buttons(tmp_path):
+    page = FakePage()
+    adapter = running_adapter(tmp_path, page)
+    message = FakeLocator(text='{"content_summary":"clean"}')
+
+    text = await adapter._assistant_text(message)
+
+    assert text == '{"content_summary":"clean"}'
+    assert "querySelectorAll('button')" in message.evaluate_script
 
 
 @pytest.mark.asyncio

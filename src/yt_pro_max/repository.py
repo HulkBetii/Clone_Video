@@ -44,6 +44,7 @@ class StoredJob:
     cached: bool
     created_at: str
     updated_at: str
+    auto_rewrite_requested: bool = False
 
 
 class JobRepository:
@@ -61,6 +62,7 @@ class JobRepository:
                     request_url TEXT NOT NULL,
                     requested_language TEXT,
                     force_refresh INTEGER NOT NULL DEFAULT 0,
+                    auto_rewrite_requested INTEGER NOT NULL DEFAULT 0,
                     status TEXT NOT NULL,
                     stage TEXT,
                     progress INTEGER NOT NULL DEFAULT 0,
@@ -80,6 +82,17 @@ class JobRepository:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS jobs_cache_idx ON jobs(cache_key, status, updated_at)"
             )
+            self._add_column_if_missing(
+                connection,
+                "auto_rewrite_requested",
+                "INTEGER NOT NULL DEFAULT 0",
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS jobs_workspace_idx
+                ON jobs(auto_rewrite_requested, status, updated_at)
+                """
+            )
 
     def create_job(
         self,
@@ -89,6 +102,7 @@ class JobRepository:
         request_url: str,
         requested_language: str | None,
         force_refresh: bool,
+        auto_rewrite_requested: bool = False,
     ) -> StoredJob:
         timestamp = _now()
         with self._connect() as connection:
@@ -96,8 +110,8 @@ class JobRepository:
                 """
                 INSERT INTO jobs (
                     id, cache_key, request_url, requested_language, force_refresh,
-                    status, progress, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)
+                    auto_rewrite_requested, status, progress, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
                 """,
                 (
                     job_id,
@@ -105,6 +119,7 @@ class JobRepository:
                     request_url,
                     requested_language,
                     int(force_refresh),
+                    int(auto_rewrite_requested),
                     JobStatus.QUEUED.value,
                     timestamp,
                     timestamp,
@@ -140,6 +155,72 @@ class JobRepository:
                 (JobStatus.QUEUED.value, JobStatus.RUNNING.value),
             ).fetchall()
         return [_row_to_job(row) for row in rows]
+
+    def request_auto_rewrite(self, job_id: str) -> StoredJob:
+        current = self.get_job(job_id)
+        if current is None:
+            raise KeyError(job_id)
+        if current.auto_rewrite_requested:
+            return current
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE jobs
+                SET auto_rewrite_requested = 1, updated_at = ?
+                WHERE id = ?
+                """,
+                (_now(), job_id),
+            )
+        job = self.get_job(job_id)
+        if job is None:
+            raise KeyError(job_id)
+        return job
+
+    def list_auto_rewrite_candidates(self) -> list[StoredJob]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM jobs
+                WHERE auto_rewrite_requested = 1 AND status = ?
+                ORDER BY updated_at, id
+                """,
+                (JobStatus.COMPLETED.value,),
+            ).fetchall()
+        return [_row_to_job(row) for row in rows]
+
+    def list_jobs(
+        self,
+        *,
+        query: str | None = None,
+        statuses: tuple[JobStatus, ...] | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[StoredJob]:
+        sql, values = _job_list_query(query=query, statuses=statuses)
+        sql += " ORDER BY created_at DESC, id DESC"
+        if limit is not None:
+            if limit <= 0:
+                raise ValueError("limit must be positive")
+            if offset < 0:
+                raise ValueError("offset must not be negative")
+            sql += " LIMIT ? OFFSET ?"
+            values.extend((limit, offset))
+        elif offset:
+            raise ValueError("offset requires a limit")
+        with self._connect() as connection:
+            rows = connection.execute(sql, values).fetchall()
+        return [_row_to_job(row) for row in rows]
+
+    def count_jobs(
+        self,
+        *,
+        query: str | None = None,
+        statuses: tuple[JobStatus, ...] | None = None,
+    ) -> int:
+        sql, values = _job_list_query(query=query, statuses=statuses, count=True)
+        with self._connect() as connection:
+            row = connection.execute(sql, values).fetchone()
+        return int(row[0])
 
     def update_job(self, job_id: str, **changes: Any) -> StoredJob:
         unknown_columns = changes.keys() - UPDATABLE_COLUMNS
@@ -180,6 +261,18 @@ class JobRepository:
         connection.row_factory = sqlite3.Row
         return connection
 
+    @staticmethod
+    def _add_column_if_missing(
+        connection: sqlite3.Connection,
+        column: str,
+        definition: str,
+    ) -> None:
+        columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(jobs)").fetchall()
+        }
+        if column not in columns:
+            connection.execute(f"ALTER TABLE jobs ADD COLUMN {column} {definition}")  # noqa: S608
+
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
@@ -195,6 +288,31 @@ def _serialize_value(column: str, value: Any) -> Any:
     return value
 
 
+def _job_list_query(
+    *,
+    query: str | None,
+    statuses: tuple[JobStatus, ...] | None,
+    count: bool = False,
+) -> tuple[str, list[Any]]:
+    sql = "SELECT COUNT(*) FROM jobs" if count else "SELECT * FROM jobs"
+    clauses: list[str] = []
+    values: list[Any] = []
+    normalized_query = query.strip() if query else ""
+    if normalized_query:
+        clauses.append(
+            "(request_url LIKE ? OR requested_language LIKE ? OR video_json LIKE ?)"
+        )
+        pattern = f"%{normalized_query}%"
+        values.extend((pattern, pattern, pattern))
+    if statuses:
+        placeholders = ", ".join("?" for _ in statuses)
+        clauses.append(f"status IN ({placeholders})")
+        values.extend(status.value for status in statuses)
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    return sql, values
+
+
 def _row_to_job(row: sqlite3.Row) -> StoredJob:
     return StoredJob(
         id=row["id"],
@@ -202,6 +320,7 @@ def _row_to_job(row: sqlite3.Row) -> StoredJob:
         request_url=row["request_url"],
         requested_language=row["requested_language"],
         force_refresh=bool(row["force_refresh"]),
+        auto_rewrite_requested=bool(row["auto_rewrite_requested"]),
         status=JobStatus(row["status"]),
         stage=JobStage(row["stage"]) if row["stage"] else None,
         progress=row["progress"],

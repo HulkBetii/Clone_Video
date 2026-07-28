@@ -37,6 +37,15 @@ class RewriteWorker:
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._queued_ids: set[str] = set()
         self._task: asyncio.Task[None] | None = None
+        self._active_job_id: str | None = None
+
+    @property
+    def active_job_id(self) -> str | None:
+        return self._active_job_id
+
+    @property
+    def queue_depth(self) -> int:
+        return self._queue.qsize()
 
     async def start(self) -> None:
         for job in self.repository.list_unfinished():
@@ -52,6 +61,7 @@ class RewriteWorker:
         task = self._task
         self._task = None
         self._queued_ids.clear()
+        self._active_job_id = None
         if task is not None:
             task.cancel()
             with suppress(asyncio.CancelledError):
@@ -69,10 +79,27 @@ class RewriteWorker:
         self._queued_ids.add(job_id)
         await self._queue.put(job_id)
 
+    async def resume(self, job_id: str) -> StoredRewriteJob:
+        """Requeue the same rewrite job without clearing persisted checkpoints."""
+        job = self.repository.get_job(job_id)
+        if job is None:
+            raise KeyError(job_id)
+        if job.status == JobStatus.COMPLETED:
+            return job
+        if job.status not in {JobStatus.QUEUED, JobStatus.RUNNING}:
+            job = self.repository.update_job(
+                job_id,
+                status=JobStatus.QUEUED,
+                error_json=None,
+            )
+        await self.enqueue(job_id)
+        return job
+
     async def _run(self) -> None:
         while True:
             job_id = await self._queue.get()
             self._queued_ids.discard(job_id)
+            self._active_job_id = job_id
             try:
                 await self._process(job_id)
             except asyncio.CancelledError:
@@ -80,6 +107,8 @@ class RewriteWorker:
             except Exception:
                 LOGGER.exception("Rewrite worker job loop failure job_id=%s", job_id)
                 self._record_internal_failure(job_id)
+            finally:
+                self._active_job_id = None
 
     async def _process(self, job_id: str) -> None:
         job = self.repository.get_job(job_id)
@@ -129,6 +158,7 @@ class RewriteWorker:
                 "title": result.title,
                 "artifact_path": str(result.artifact_path),
                 "warnings_json": result.warnings or [],
+                "validation_json": getattr(result, "validation", None),
                 "error_json": None,
             }
             optional_fields = {

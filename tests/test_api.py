@@ -68,6 +68,7 @@ def test_create_poll_cache_and_download(settings):
         job_id = created.json()["id"]
         completed = _wait_for_status(client, job_id, {"completed"})
         assert completed.json()["artifacts"]["srt"].endswith("/artifacts/srt")
+        assert app.state.repository.get_job(job_id).cache_key.startswith("v2:")
 
         artifact = client.get(f"/api/v1/transcript-jobs/{job_id}/artifacts/srt")
         assert artifact.status_code == 200

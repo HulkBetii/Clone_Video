@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import logging
 import os
+import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +13,10 @@ from yt_pro_max.errors import PipelineError
 from yt_pro_max.models import TranscriptSegment, WordTimestamp
 
 LOGGER = logging.getLogger(__name__)
+LANGUAGE_DETECTION_SAMPLE_SECONDS = 90
+LANGUAGE_DETECTION_SEGMENTS = 3
+LANGUAGE_DETECTION_TIMEOUT_SECONDS = 120
+WHISPER_SAMPLE_RATE = 16_000
 
 
 @dataclass(frozen=True)
@@ -30,19 +35,45 @@ class WhisperTranscriber:
         self._compute_type: str | None = None
         self._warnings: list[str] = []
         self._gpu_failed = False
+        self._cuda_dll_handle = _configure_cuda_dll_directory(settings.cuda_dll_dir)
 
     def transcribe(
         self,
         audio_path: Path,
         *,
+        language: str | None = None,
         progress_callback: Callable[[int], None] | None = None,
     ) -> TranscriptionResult:
+        language_sample = _load_language_sample(audio_path) if language else None
         model = self._load_model()
+        detected_language: str | None = None
+        detected_confidence: float | None = None
         try:
+            if language_sample is not None:
+                detected_language, detected_confidence, _ = model.detect_language(
+                    audio=language_sample,
+                    vad_filter=True,
+                    language_detection_segments=LANGUAGE_DETECTION_SEGMENTS,
+                )
+                if _base_language(detected_language) != _base_language(language):
+                    raise PipelineError(
+                        "TRANSCRIPTION_LANGUAGE_MISMATCH",
+                        "Whisper detected a different spoken language than expected.",
+                        details={
+                            "expected_language": language,
+                            "detected_language": detected_language,
+                            "language_confidence": detected_confidence,
+                        },
+                    )
+            options = {
+                "vad_filter": True,
+                "word_timestamps": True,
+            }
+            if language:
+                options["language"] = language
             raw_segments, info = model.transcribe(
                 str(audio_path),
-                vad_filter=True,
-                word_timestamps=True,
+                **options,
             )
             segments = []
             for raw_segment in raw_segments:
@@ -75,7 +106,11 @@ class WhisperTranscriber:
                 self._device = None
                 self._compute_type = None
                 self._gpu_failed = True
-                return self.transcribe(audio_path, progress_callback=progress_callback)
+                return self.transcribe(
+                    audio_path,
+                    language=language,
+                    progress_callback=progress_callback,
+                )
             LOGGER.exception("Whisper transcription failed")
             raise PipelineError(
                 "TRANSCRIPTION_FAILED", "Local Whisper transcription failed."
@@ -86,17 +121,21 @@ class WhisperTranscriber:
                 "NO_SPEECH_DETECTED", "No speech was detected in the downloaded audio."
             )
 
-        language = str(getattr(info, "language", "") or "").strip().lower()
-        if not language:
+        result_language = str(
+            detected_language or getattr(info, "language", "") or ""
+        ).strip().lower()
+        if not result_language:
             raise PipelineError(
                 "TRANSCRIPTION_FAILED", "Whisper did not identify a spoken language."
             )
-        confidence = _safe_float(getattr(info, "language_probability", None))
+        confidence = detected_confidence
+        if confidence is None:
+            confidence = _safe_float(getattr(info, "language_probability", None))
         warnings = list(self._warnings)
         if confidence is not None and confidence < 0.5:
             warnings.append("LOW_LANGUAGE_CONFIDENCE")
         return TranscriptionResult(
-            language=language,
+            language=result_language,
             language_confidence=confidence,
             segments=segments,
             warnings=warnings,
@@ -115,6 +154,7 @@ class WhisperTranscriber:
 
             result["cuda_device_count"] = ctranslate2.get_cuda_device_count()
             result["cuda_runtime_available"], runtime_error = _cuda_runtime_status()
+            result["cuda_dll_dir_configured"] = self.settings.cuda_dll_dir is not None
             if runtime_error:
                 result["runtime_error"] = runtime_error
         except Exception as error:
@@ -125,7 +165,13 @@ class WhisperTranscriber:
     def _load_model(self):
         if self._model is not None:
             return self._model
-        from faster_whisper import WhisperModel
+        try:
+            from faster_whisper import WhisperModel
+        except Exception as error:
+            LOGGER.exception("Unable to import faster-whisper")
+            raise PipelineError(
+                "MODEL_LOAD_FAILED", "The local Whisper model could not be loaded."
+            ) from error
 
         if not self._gpu_failed and self.settings.whisper_device in {"auto", "cuda"}:
             try:
@@ -183,6 +229,52 @@ def _safe_float(value) -> float | None:
         return None
 
 
+def _base_language(language: str) -> str:
+    return language.strip().lower().split("-", 1)[0]
+
+
+def _load_language_sample(audio_path: Path):
+    try:
+        import numpy as np
+
+        command = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(audio_path),
+            "-t",
+            str(LANGUAGE_DETECTION_SAMPLE_SECONDS),
+            "-ac",
+            "1",
+            "-ar",
+            str(WHISPER_SAMPLE_RATE),
+            "-f",
+            "s16le",
+            "pipe:1",
+        ]
+        completed = subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            timeout=LANGUAGE_DETECTION_TIMEOUT_SECONDS,
+        )
+        if not completed.stdout:
+            raise ValueError("language detection sample is empty")
+        return np.frombuffer(completed.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+    except PipelineError:
+        raise
+    except Exception as error:
+        LOGGER.exception("Unable to prepare audio for Whisper language detection")
+        raise PipelineError(
+            "TRANSCRIPTION_FAILED",
+            "Local Whisper language detection could not read the downloaded audio.",
+            details={"stage": "language_detection"},
+        ) from error
+
+
 def _cuda_runtime_status() -> tuple[bool, str | None]:
     if os.name != "nt":
         return True, None
@@ -192,3 +284,21 @@ def _cuda_runtime_status() -> tuple[bool, str | None]:
         except OSError:
             return False, f"{library}_NOT_FOUND"
     return True, None
+
+
+def _configure_cuda_dll_directory(cuda_dll_dir: Path | None):
+    if os.name != "nt" or cuda_dll_dir is None:
+        return None
+    resolved_dir = cuda_dll_dir.expanduser().resolve()
+    if not resolved_dir.is_dir():
+        LOGGER.warning("Configured CUDA DLL directory does not exist: %s", resolved_dir)
+        return None
+    current_path = os.environ.get("PATH", "")
+    path_entries = current_path.split(os.pathsep) if current_path else []
+    if not any(entry.casefold() == str(resolved_dir).casefold() for entry in path_entries):
+        os.environ["PATH"] = os.pathsep.join([str(resolved_dir), *path_entries])
+    try:
+        return os.add_dll_directory(str(resolved_dir))
+    except OSError as error:
+        LOGGER.warning("Unable to register CUDA DLL directory: %s", error)
+        return None

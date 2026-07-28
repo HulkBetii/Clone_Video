@@ -1,0 +1,19 @@
+.row { display: grid; grid-template-columns: 48px 1fr; border-top: 1px solid var(--line); }
+.row:first-child { border-top: 0; }
+.selector { position: relative; display: grid; place-items: center; align-self: stretch; cursor: pointer; }
+.selector input { position: absolute; width: 20px; height: 20px; margin: 0; opacity: 0; cursor: pointer; }
+.selector span { display: grid; width: 20px; height: 20px; place-items: center; border: 1px solid var(--muted); border-radius: 6px; color: var(--paper-raised); background: transparent; }
+.selector input:checked + span { border-color: var(--coral); background: var(--coral); }
+.selector input:disabled + span { opacity: .35; cursor: not-allowed; }
+.card { position: relative; display: grid; grid-template-columns: 58px 1fr auto; gap: 18px; align-items: start; padding: 21px 21px 21px 0; color: var(--ink); text-decoration: none; transition: 160ms ease; }
+.card:hover { background: rgba(255,255,255,.30); }
+.card:hover .arrow { transform: translate(2px, -2px); color: var(--coral); }
+.index { width: 58px; aspect-ratio: 1; display: grid; place-items: center; border-radius: 15px; color: var(--paper-raised); background: var(--ink); font: 600 18px var(--serif); }
+.content { min-width: 0; }
+.topline { display: flex; align-items: center; gap: 12px; }
+.topline > span:last-child { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 10px; }
+.content h2 { margin: 9px 0 11px; overflow: hidden; font: 600 clamp(19px, 2.2vw, 24px)/1.18 var(--serif); text-overflow: ellipsis; white-space: nowrap; }
+.meta { display: flex; flex-wrap: wrap; gap: 15px; margin-bottom: 13px; color: var(--muted); font-size: 11px; }
+.meta span { display: flex; align-items: center; gap: 6px; }
+.arrow { margin-top: 5px; color: var(--muted); transition: 160ms ease; }
+@media (max-width: 600px) { .row { grid-template-columns: 38px 1fr; }.card { grid-template-columns: 42px 1fr; padding: 17px 14px 17px 0; gap: 12px; }.index { width: 42px; border-radius: 12px; font-size: 14px; }.arrow { display: none; }.content h2 { font-size: 19px; }.topline { justify-content: space-between; }.meta { gap: 10px; } }

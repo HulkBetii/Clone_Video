@@ -36,6 +36,30 @@ class RewriteStage(StrEnum):
     RENDERING = "rendering"
 
 
+class WorkspaceStatus(StrEnum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    WAITING_FOR_USER = "waiting_for_user"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class WorkspacePhase(StrEnum):
+    TRANSCRIPT = "transcript"
+    REWRITE = "rewrite"
+    COMPLETED = "completed"
+
+
+class GptRuntimeStatus(StrEnum):
+    NOT_CHECKED = "not_checked"
+    READY = "ready"
+    LOGIN_REQUIRED = "login_required"
+    PROFILE_LOCKED = "profile_locked"
+    BUSY = "busy"
+    UNAVAILABLE = "unavailable"
+    ERROR = "error"
+
+
 class TranscriptSource(StrEnum):
     MANUAL_CAPTION = "manual_caption"
     AUTOMATIC_CAPTION = "automatic_caption"
@@ -79,6 +103,38 @@ class CreateRewriteJobRequest(BaseModel):
         return normalized
 
 
+class CreateWorkspaceRequest(CreateTranscriptJobRequest):
+    auto_rewrite: bool = True
+
+
+class DeleteWorkspacesRequest(BaseModel):
+    transcript_job_ids: list[str] = Field(min_length=1, max_length=100)
+
+    @field_validator("transcript_job_ids")
+    @classmethod
+    def normalize_transcript_job_ids(cls, values: list[str]) -> list[str]:
+        normalized = list(dict.fromkeys(value.strip() for value in values if value.strip()))
+        if not normalized:
+            raise ValueError("transcript_job_ids must not be empty")
+        return normalized
+
+
+class DeleteWorkspacesResponse(BaseModel):
+    deleted_ids: list[str]
+
+
+class OpenGptRuntimeRequest(BaseModel):
+    rewrite_job_id: str | None = Field(default=None, max_length=128)
+
+    @field_validator("rewrite_job_id")
+    @classmethod
+    def normalize_rewrite_job_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+
 class ErrorInfo(BaseModel):
     code: str
     message: str
@@ -104,6 +160,8 @@ class ArtifactLinks(BaseModel):
 
 class JobResponse(BaseModel):
     id: str
+    request_url: str
+    auto_rewrite_requested: bool = False
     status: JobStatus
     stage: JobStage | None = None
     progress: int = Field(ge=0, le=100)
@@ -124,6 +182,17 @@ class RewriteArtifactLinks(BaseModel):
     txt: str
 
 
+class RewriteValidationSummary(BaseModel):
+    passed: bool
+    style_score: float = Field(ge=0, le=100)
+    coverage_score: float = Field(ge=0, le=100)
+    language_match: bool
+    tts_ready: bool
+    unsupported_claims: list[str] = Field(default_factory=list)
+    missing_points: list[str] = Field(default_factory=list)
+    length_ratio: float = Field(ge=0)
+
+
 class RewriteJobResponse(BaseModel):
     id: str
     transcript_job_id: str
@@ -137,12 +206,45 @@ class RewriteJobResponse(BaseModel):
     sections_completed: int = Field(default=0, ge=0)
     sections_total: int = Field(default=0, ge=0)
     title: str | None = None
+    validation: RewriteValidationSummary | None = None
     artifacts: RewriteArtifactLinks | None = None
     warnings: list[str] = Field(default_factory=list)
     error: ErrorInfo | None = None
     cached: bool = False
     created_at: str
     updated_at: str
+
+
+class WorkspaceResponse(BaseModel):
+    id: str
+    status: WorkspaceStatus
+    phase: WorkspacePhase
+    progress: int = Field(ge=0, le=100)
+    auto_rewrite: bool
+    request_url: str
+    transcript: JobResponse
+    rewrite: RewriteJobResponse | None = None
+    action_required: ErrorInfo | None = None
+    created_at: str
+    updated_at: str
+
+
+class WorkspaceListResponse(BaseModel):
+    items: list[WorkspaceResponse]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1)
+    offset: int = Field(ge=0)
+
+
+class GptRuntimeResponse(BaseModel):
+    status: GptRuntimeStatus
+    profile_id: str
+    profile_exists: bool
+    browser_running: bool
+    authenticated: bool | None = None
+    active_job_id: str | None = None
+    queue_depth: int = Field(default=0, ge=0)
+    error: ErrorInfo | None = None
 
 
 class WordTimestamp(BaseModel):

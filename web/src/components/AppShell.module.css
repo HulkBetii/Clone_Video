@@ -1,0 +1,24 @@
+.shell { min-height: 100vh; }
+.sidebar { position: fixed; inset: 0 auto 0 0; width: 238px; padding: 28px 18px 22px; display: flex; flex-direction: column; border-right: 1px solid var(--line); background: color-mix(in srgb, var(--paper) 94%, transparent); backdrop-filter: blur(18px); z-index: 20; }
+.brand { display: flex; gap: 12px; align-items: center; padding: 0 9px 26px; color: var(--ink); text-decoration: none; }
+.brandMark { width: 38px; height: 38px; display: grid; place-items: center; color: var(--paper); background: var(--ink); border-radius: 50% 50% 46% 54%; transform: rotate(-6deg); }
+.brand strong, .brand small { display: block; }
+.brand strong { font-family: var(--serif); font-size: 20px; line-height: 1; }
+.brand small { margin-top: 5px; color: var(--muted); font-size: 10px; letter-spacing: .13em; text-transform: uppercase; }
+.navigation { display: grid; gap: 5px; }
+.navItem { position: relative; display: flex; align-items: center; gap: 12px; padding: 11px 13px; border-radius: 12px; color: var(--muted-strong); text-decoration: none; font-weight: 500; transition: 160ms ease; }
+.navItem:hover { background: var(--paper-raised); color: var(--ink); transform: translateX(2px); }
+.navItem.active { color: var(--ink); background: var(--paper-raised); box-shadow: var(--shadow-sm); }
+.navItem.active::before { content: ""; position: absolute; left: -7px; width: 4px; height: 22px; border-radius: 4px; background: var(--coral); }
+.sidebarNote { margin-top: auto; padding: 15px; border: 1px solid var(--line); border-radius: 15px; color: var(--muted); background: rgba(255,255,255,.26); }
+.sidebarNote svg { color: var(--forest); }
+.sidebarNote p { margin: 8px 0 0; font-size: 12px; line-height: 1.55; }
+.main { margin-left: 238px; min-height: 100vh; }
+.mobileNav { display: none; }
+@media (max-width: 760px) {
+  .sidebar { display: none; }
+  .main { margin-left: 0; padding-bottom: 74px; }
+  .mobileNav { position: fixed; z-index: 40; display: grid; grid-template-columns: repeat(3, 1fr); inset: auto 10px 10px; padding: 7px; border: 1px solid var(--line); border-radius: 18px; background: color-mix(in srgb, var(--paper-raised) 92%, transparent); backdrop-filter: blur(18px); box-shadow: var(--shadow-lg); }
+  .mobileNavItem { display: grid; justify-items: center; gap: 3px; padding: 7px 4px; color: var(--muted); border-radius: 12px; text-decoration: none; font-size: 10px; font-weight: 600; }
+  .mobileNavItem.active { color: var(--ink); background: var(--paper); }
+}

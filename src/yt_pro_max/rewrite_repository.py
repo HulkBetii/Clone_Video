@@ -24,6 +24,7 @@ UPDATABLE_COLUMNS = {
     "checkpoint_json",
     "work_files_json",
     "warnings_json",
+    "validation_json",
     "error_json",
     "cached",
 }
@@ -54,6 +55,7 @@ class StoredRewriteJob:
     cached: bool
     created_at: str
     updated_at: str
+    validation: dict[str, Any] | None = None
 
 
 class RewriteJobRepository:
@@ -85,6 +87,7 @@ class RewriteJobRepository:
                     checkpoint_json TEXT,
                     work_files_json TEXT,
                     warnings_json TEXT NOT NULL DEFAULT '[]',
+                    validation_json TEXT,
                     error_json TEXT,
                     cached INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
@@ -93,6 +96,12 @@ class RewriteJobRepository:
                 )
                 """
             )
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(rewrite_jobs)").fetchall()
+            }
+            if "validation_json" not in columns:
+                connection.execute("ALTER TABLE rewrite_jobs ADD COLUMN validation_json TEXT")
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS rewrite_jobs_cache_idx
@@ -154,6 +163,19 @@ class RewriteJobRepository:
 
     def find_active(self, cache_key: str) -> StoredRewriteJob | None:
         return self._find_latest(cache_key, (JobStatus.QUEUED, JobStatus.RUNNING))
+
+    def find_latest_for_source(self, transcript_job_id: str) -> StoredRewriteJob | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM rewrite_jobs
+                WHERE transcript_job_id = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (transcript_job_id,),
+            ).fetchone()
+        return _row_to_job(row) if row else None
 
     def list_unfinished(self) -> list[StoredRewriteJob]:
         with self._connect() as connection:
@@ -221,7 +243,13 @@ def _now() -> str:
 
 
 def _serialize_value(column: str, value: Any) -> Any:
-    if column in {"checkpoint_json", "work_files_json", "warnings_json", "error_json"}:
+    if column in {
+        "checkpoint_json",
+        "work_files_json",
+        "warnings_json",
+        "validation_json",
+        "error_json",
+    }:
         return json.dumps(value, ensure_ascii=False) if value is not None else None
     if column in {"status", "stage"} and value is not None:
         return value.value if hasattr(value, "value") else value
@@ -255,4 +283,5 @@ def _row_to_job(row: sqlite3.Row) -> StoredRewriteJob:
         cached=bool(row["cached"]),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        validation=json.loads(row["validation_json"]) if row["validation_json"] else None,
     )

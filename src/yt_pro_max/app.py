@@ -8,8 +8,8 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 import yt_dlp
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from yt_pro_max.config import Settings, get_settings
 from yt_pro_max.errors import PipelineError
@@ -17,12 +17,22 @@ from yt_pro_max.models import (
     ArtifactLinks,
     CreateRewriteJobRequest,
     CreateTranscriptJobRequest,
+    CreateWorkspaceRequest,
+    DeleteWorkspacesRequest,
+    DeleteWorkspacesResponse,
     ErrorInfo,
+    GptRuntimeResponse,
+    GptRuntimeStatus,
     JobResponse,
     JobStatus,
+    OpenGptRuntimeRequest,
     RewriteArtifactLinks,
     RewriteJobResponse,
+    RewriteValidationSummary,
     VideoMetadata,
+    WorkspaceListResponse,
+    WorkspaceResponse,
+    WorkspaceStatus,
 )
 from yt_pro_max.pipeline import TranscriptPipeline
 from yt_pro_max.repository import JobRepository, StoredJob
@@ -30,6 +40,7 @@ from yt_pro_max.rewrite_repository import RewriteJobRepository, StoredRewriteJob
 from yt_pro_max.rewrite_worker import RewriteWorker
 from yt_pro_max.url_utils import canonicalize_youtube_url
 from yt_pro_max.worker import JobWorker
+from yt_pro_max.workspace import WorkspaceCoordinator, WorkspaceService, WorkspaceSnapshot
 
 
 def create_app(
@@ -56,10 +67,26 @@ def create_app(
         if app_rewrite_pipeline is not None
         else None
     )
+    app_workspace_service = WorkspaceService(
+        app_repository,
+        app_rewrite_repository,
+        app_settings,
+    )
+    app_workspace_coordinator = (
+        WorkspaceCoordinator(
+            app_repository,
+            app_rewrite_repository,
+            app_rewrite_worker,
+            app_settings,
+            service=app_workspace_service,
+        )
+        if app_rewrite_worker is not None
+        else None
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        nonlocal app_rewrite_pipeline, app_rewrite_worker
+        nonlocal app_rewrite_pipeline, app_rewrite_worker, app_workspace_coordinator
         app_repository.initialize()
         app_rewrite_repository.initialize()
         if app_rewrite_pipeline is None:
@@ -73,17 +100,30 @@ def create_app(
             )
             app.state.rewrite_pipeline = app_rewrite_pipeline
             app.state.rewrite_worker = app_rewrite_worker
-        await app_worker.start()
         if app_rewrite_worker is None:
             raise RuntimeError("rewrite worker was not initialized")
+        if app_workspace_coordinator is None:
+            app_workspace_coordinator = WorkspaceCoordinator(
+                app_repository,
+                app_rewrite_repository,
+                app_rewrite_worker,
+                app_settings,
+                service=app_workspace_service,
+            )
+            app.state.workspace_coordinator = app_workspace_coordinator
+        await app_worker.start()
         await app_rewrite_worker.start()
+        await app_workspace_coordinator.start()
         try:
             yield
         finally:
             try:
-                await app_rewrite_worker.stop()
+                await app_workspace_coordinator.stop()
             finally:
-                await app_worker.stop()
+                try:
+                    await app_rewrite_worker.stop()
+                finally:
+                    await app_worker.stop()
 
     app = FastAPI(title=app_settings.app_name, version="0.1.0", lifespan=lifespan)
     app.state.settings = app_settings
@@ -93,14 +133,22 @@ def create_app(
     app.state.rewrite_repository = app_rewrite_repository
     app.state.rewrite_pipeline = app_rewrite_pipeline
     app.state.rewrite_worker = app_rewrite_worker
+    app.state.workspace_service = app_workspace_service
+    app.state.workspace_coordinator = app_workspace_coordinator
+    app.state.gpt_runtime_authenticated = None
+    app.state.gpt_runtime_error = None
 
-    @app.post("/api/v1/transcript-jobs", response_model=JobResponse, name="create_job")
-    async def create_job(request: CreateTranscriptJobRequest, http_request: Request):
+    async def submit_transcript(
+        request: CreateTranscriptJobRequest,
+        *,
+        auto_rewrite: bool,
+    ) -> tuple[StoredJob, bool]:
         try:
             canonical = canonicalize_youtube_url(request.url)
         except PipelineError as error:
             raise HTTPException(
-                status_code=422, detail=error.info.model_dump(mode="json")
+                status_code=422,
+                detail=error.info.model_dump(mode="json"),
             ) from error
 
         cache_key = _cache_key(
@@ -112,11 +160,9 @@ def create_app(
         if not request.force_refresh:
             cached_job = app_repository.find_completed(cache_key)
             if cached_job and _artifacts_exist(cached_job):
-                response = _job_response(cached_job, http_request, cached_override=True)
-                return JSONResponse(
-                    status_code=200,
-                    content=response.model_dump(mode="json", by_alias=True),
-                )
+                if auto_rewrite:
+                    cached_job = app_repository.request_auto_rewrite(cached_job.id)
+                return cached_job, True
 
         job = app_repository.create_job(
             job_id=str(uuid.uuid4()),
@@ -124,11 +170,17 @@ def create_app(
             request_url=canonical.url,
             requested_language=request.language,
             force_refresh=request.force_refresh,
+            auto_rewrite_requested=auto_rewrite,
         )
         await app_worker.enqueue(job.id)
-        response = _job_response(job, http_request)
+        return job, False
+
+    @app.post("/api/v1/transcript-jobs", response_model=JobResponse, name="create_job")
+    async def create_job(request: CreateTranscriptJobRequest, http_request: Request):
+        job, cached = await submit_transcript(request, auto_rewrite=False)
+        response = _job_response(job, http_request, cached_override=cached)
         return JSONResponse(
-            status_code=202,
+            status_code=200 if cached else 202,
             headers={"Location": str(http_request.url_for("get_job", job_id=job.id))},
             content=response.model_dump(mode="json", by_alias=True),
         )
@@ -162,6 +214,120 @@ def create_app(
             "json": "application/json",
         }
         return FileResponse(path, media_type=media_types[artifact_format], filename=path.name)
+
+    @app.post(
+        "/api/v1/workspaces",
+        response_model=WorkspaceResponse,
+        name="create_workspace",
+    )
+    async def create_workspace(request: CreateWorkspaceRequest, http_request: Request):
+        job, transcript_cached = await submit_transcript(
+            request,
+            auto_rewrite=request.auto_rewrite,
+        )
+        coordinator: WorkspaceCoordinator = http_request.app.state.workspace_coordinator
+        if request.auto_rewrite and job.status == JobStatus.COMPLETED:
+            await coordinator.request_auto_rewrite(
+                job.id,
+                force_refresh=request.force_refresh,
+            )
+        snapshot = app_workspace_service.get_workspace(job.id)
+        if snapshot is None:
+            raise _rewrite_http_error(404, "WORKSPACE_NOT_FOUND", "Workspace not found.")
+        response = _workspace_response(
+            snapshot,
+            http_request,
+            transcript_cached=transcript_cached,
+        )
+        completed_cache_hit = transcript_cached and snapshot.status == WorkspaceStatus.COMPLETED
+        return JSONResponse(
+            status_code=200 if completed_cache_hit else 202,
+            headers={
+                "Location": str(
+                    http_request.url_for("get_workspace", transcript_job_id=job.id)
+                )
+            },
+            content=response.model_dump(mode="json", by_alias=True),
+        )
+
+    @app.get(
+        "/api/v1/workspaces",
+        response_model=WorkspaceListResponse,
+        name="list_workspaces",
+    )
+    async def list_workspaces(
+        http_request: Request,
+        status: WorkspaceStatus | None = None,
+        q: str | None = Query(default=None, max_length=200),
+        limit: int = Query(default=20, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+    ):
+        snapshots, total = app_workspace_service.list_workspaces(
+            status=status,
+            query=q,
+            limit=limit,
+            offset=offset,
+        )
+        return WorkspaceListResponse(
+            items=[_workspace_response(item, http_request) for item in snapshots],
+            total=total,
+            limit=limit,
+            offset=offset,
+        )
+
+    @app.post(
+        "/api/v1/workspaces/bulk-delete",
+        response_model=DeleteWorkspacesResponse,
+        name="delete_workspaces",
+    )
+    async def delete_workspaces(request: DeleteWorkspacesRequest, http_request: Request):
+        service: WorkspaceService = http_request.app.state.workspace_service
+        try:
+            deleted_ids = service.delete_workspaces(request.transcript_job_ids)
+        except PipelineError as error:
+            status_code = 404 if error.info.code == "WORKSPACE_NOT_FOUND" else 409
+            raise HTTPException(
+                status_code=status_code,
+                detail=error.info.model_dump(mode="json"),
+            ) from error
+        return DeleteWorkspacesResponse(deleted_ids=deleted_ids)
+
+    @app.get(
+        "/api/v1/workspaces/{transcript_job_id}",
+        response_model=WorkspaceResponse,
+        name="get_workspace",
+    )
+    async def get_workspace(transcript_job_id: str, http_request: Request):
+        snapshot = app_workspace_service.get_workspace(transcript_job_id)
+        if snapshot is None:
+            raise _rewrite_http_error(404, "WORKSPACE_NOT_FOUND", "Workspace not found.")
+        return _workspace_response(snapshot, http_request)
+
+    @app.post(
+        "/api/v1/workspaces/{transcript_job_id}/resume",
+        response_model=WorkspaceResponse,
+        name="resume_workspace",
+    )
+    async def resume_workspace(transcript_job_id: str, http_request: Request):
+        coordinator: WorkspaceCoordinator = http_request.app.state.workspace_coordinator
+        try:
+            await coordinator.resume(transcript_job_id)
+        except PipelineError as error:
+            status_code = 404 if error.info.code == "REWRITE_JOB_NOT_FOUND" else 409
+            raise HTTPException(
+                status_code=status_code,
+                detail=error.info.model_dump(mode="json"),
+            ) from error
+        snapshot = app_workspace_service.get_workspace(transcript_job_id)
+        if snapshot is None:
+            raise _rewrite_http_error(404, "WORKSPACE_NOT_FOUND", "Workspace not found.")
+        return JSONResponse(
+            status_code=202,
+            content=_workspace_response(snapshot, http_request).model_dump(
+                mode="json",
+                by_alias=True,
+            ),
+        )
 
     @app.post(
         "/api/v1/rewrite-jobs",
@@ -262,6 +428,92 @@ def create_app(
             raise _rewrite_http_error(404, "ARTIFACT_NOT_FOUND", "Artifact not found.")
         return FileResponse(path, media_type="text/plain", filename=path.name)
 
+    @app.get(
+        "/api/v1/gpt-runtime",
+        response_model=GptRuntimeResponse,
+        name="get_gpt_runtime",
+    )
+    async def get_gpt_runtime(http_request: Request):
+        return _gpt_runtime_response(http_request)
+
+    @app.post(
+        "/api/v1/gpt-runtime/open",
+        response_model=GptRuntimeResponse,
+        name="open_gpt_runtime",
+    )
+    async def open_gpt_runtime(request: OpenGptRuntimeRequest, http_request: Request):
+        _ensure_gpt_idle(http_request)
+        conversation_url = None
+        if request.rewrite_job_id:
+            rewrite_job = app_rewrite_repository.get_job(request.rewrite_job_id)
+            if rewrite_job is None:
+                raise _rewrite_http_error(
+                    404,
+                    "REWRITE_JOB_NOT_FOUND",
+                    "Rewrite job not found.",
+                )
+            conversation_url = rewrite_job.conversation_url
+        open_browser = getattr(http_request.app.state.rewrite_pipeline, "open_browser", None)
+        if not callable(open_browser):
+            raise _rewrite_http_error(
+                503,
+                "GPT_BROWSER_UNAVAILABLE",
+                "The ChatGPT browser runtime is unavailable.",
+            )
+        try:
+            await open_browser(conversation_url)
+        except PipelineError as error:
+            http_request.app.state.gpt_runtime_error = error.info.model_dump(mode="json")
+            raise _gpt_runtime_http_error(error) from error
+        http_request.app.state.gpt_runtime_authenticated = None
+        http_request.app.state.gpt_runtime_error = None
+        return _gpt_runtime_response(http_request)
+
+    @app.post(
+        "/api/v1/gpt-runtime/check",
+        response_model=GptRuntimeResponse,
+        name="check_gpt_runtime",
+    )
+    async def check_gpt_runtime(http_request: Request):
+        _ensure_gpt_idle(http_request)
+        check_login = getattr(http_request.app.state.rewrite_pipeline, "check_login", None)
+        if not callable(check_login):
+            raise _rewrite_http_error(
+                503,
+                "GPT_BROWSER_UNAVAILABLE",
+                "The ChatGPT browser runtime is unavailable.",
+            )
+        try:
+            http_request.app.state.gpt_runtime_authenticated = bool(await check_login())
+            http_request.app.state.gpt_runtime_error = None
+        except PipelineError as error:
+            error_data = error.info.model_dump(mode="json")
+            http_request.app.state.gpt_runtime_error = error_data
+            if error.info.code == "GPT_LOGIN_REQUIRED":
+                http_request.app.state.gpt_runtime_authenticated = False
+                return _gpt_runtime_response(http_request)
+            raise _gpt_runtime_http_error(error) from error
+        return _gpt_runtime_response(http_request)
+
+    @app.post(
+        "/api/v1/gpt-runtime/close",
+        response_model=GptRuntimeResponse,
+        name="close_gpt_runtime",
+    )
+    async def close_gpt_runtime(http_request: Request):
+        _ensure_gpt_idle(http_request)
+        close_browser = getattr(http_request.app.state.rewrite_pipeline, "close_browser", None)
+        if not callable(close_browser):
+            raise _rewrite_http_error(
+                503,
+                "GPT_BROWSER_UNAVAILABLE",
+                "The ChatGPT browser runtime is unavailable.",
+            )
+        await close_browser()
+        http_request.app.state.gpt_runtime_authenticated = None
+        http_request.app.state.gpt_runtime_error = None
+        return _gpt_runtime_response(http_request)
+
     @app.get("/api/v1/health", name="health")
     async def health():
         transcriber = app_pipeline.transcriber
@@ -294,6 +546,24 @@ def create_app(
         )
         return {"status": "ok" if healthy else "degraded", "checks": checks}
 
+    static_dir = Path(__file__).resolve().parent / "static"
+
+    @app.get("/{path:path}", include_in_schema=False, name="serve_spa")
+    async def serve_spa(path: str):
+        if path == "api" or path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not found.")
+        static_root = static_dir.resolve()
+        requested_path = (static_root / path).resolve()
+        if requested_path.is_relative_to(static_root) and requested_path.is_file():
+            return FileResponse(requested_path)
+        index_path = static_root / "index.html"
+        if index_path.is_file():
+            return FileResponse(index_path, media_type="text/html")
+        return HTMLResponse(
+            "<h1>YT Pro Max</h1><p>Frontend assets are not built.</p>",
+            status_code=503,
+        )
+
     return app
 
 
@@ -319,6 +589,8 @@ def _job_response(job: StoredJob, request: Request, cached_override: bool = Fals
         )
     return JobResponse(
         id=job.id,
+        request_url=job.request_url,
+        auto_rewrite_requested=job.auto_rewrite_requested,
         status=job.status,
         stage=job.stage,
         progress=job.progress,
@@ -360,12 +632,116 @@ def _rewrite_job_response(
         sections_completed=job.sections_completed,
         sections_total=job.sections_total,
         title=job.title,
+        validation=RewriteValidationSummary(**job.validation) if job.validation else None,
         artifacts=artifacts,
         warnings=job.warnings,
         error=ErrorInfo(**job.error) if job.error else None,
         cached=cached_override or job.cached,
         created_at=job.created_at,
         updated_at=job.updated_at,
+    )
+
+
+def _workspace_response(
+    snapshot: WorkspaceSnapshot,
+    request: Request,
+    *,
+    transcript_cached: bool = False,
+) -> WorkspaceResponse:
+    return WorkspaceResponse(
+        id=snapshot.id,
+        status=snapshot.status,
+        phase=snapshot.phase,
+        progress=snapshot.progress,
+        auto_rewrite=(
+            snapshot.transcript.auto_rewrite_requested or snapshot.rewrite is not None
+        ),
+        request_url=snapshot.transcript.request_url,
+        transcript=_job_response(
+            snapshot.transcript,
+            request,
+            cached_override=transcript_cached,
+        ),
+        rewrite=(
+            _rewrite_job_response(
+                snapshot.rewrite,
+                snapshot.transcript,
+                request,
+                cached_override=snapshot.rewrite_cache_hit,
+            )
+            if snapshot.rewrite
+            else None
+        ),
+        action_required=(
+            ErrorInfo(**snapshot.action_required) if snapshot.action_required else None
+        ),
+        created_at=snapshot.created_at,
+        updated_at=snapshot.updated_at,
+    )
+
+
+def _gpt_runtime_response(request: Request) -> GptRuntimeResponse:
+    settings: Settings = request.app.state.settings
+    worker = request.app.state.rewrite_worker
+    pipeline = request.app.state.rewrite_pipeline
+    health = getattr(pipeline, "health", None)
+    checks = health() if callable(health) else {}
+    profile_exists = bool(checks.get("profile_exists", settings.gpt_profile_dir.is_dir()))
+    browser_running = bool(checks.get("browser_running", False))
+    active_job_id = getattr(worker, "active_job_id", None)
+    queue_depth = int(getattr(worker, "queue_depth", 0))
+    error_data = request.app.state.gpt_runtime_error
+    authenticated = request.app.state.gpt_runtime_authenticated
+
+    if active_job_id:
+        status = GptRuntimeStatus.BUSY
+    elif not profile_exists:
+        status = GptRuntimeStatus.UNAVAILABLE
+    elif error_data:
+        code = str(error_data.get("code") or "")
+        if code == "GPT_PROFILE_LOCKED":
+            status = GptRuntimeStatus.PROFILE_LOCKED
+        elif code == "GPT_LOGIN_REQUIRED":
+            status = GptRuntimeStatus.LOGIN_REQUIRED
+        elif code in {"GPT_BROWSER_UNAVAILABLE", "GPT_PROFILE_MISSING"}:
+            status = GptRuntimeStatus.UNAVAILABLE
+        else:
+            status = GptRuntimeStatus.ERROR
+    elif authenticated is True:
+        status = GptRuntimeStatus.READY
+    elif authenticated is False:
+        status = GptRuntimeStatus.LOGIN_REQUIRED
+    else:
+        status = GptRuntimeStatus.NOT_CHECKED
+
+    return GptRuntimeResponse(
+        status=status,
+        profile_id=settings.gpt_profile_id,
+        profile_exists=profile_exists,
+        browser_running=browser_running,
+        authenticated=authenticated,
+        active_job_id=active_job_id,
+        queue_depth=queue_depth,
+        error=ErrorInfo(**error_data) if error_data else None,
+    )
+
+
+def _ensure_gpt_idle(request: Request) -> None:
+    worker = request.app.state.rewrite_worker
+    if getattr(worker, "active_job_id", None):
+        raise _rewrite_http_error(
+            409,
+            "GPT_BUSY",
+            "ChatGPT is currently processing a rewrite job.",
+            retryable=True,
+        )
+
+
+def _gpt_runtime_http_error(error: PipelineError) -> HTTPException:
+    status_code = 409 if error.info.code in {"GPT_LOGIN_REQUIRED", "GPT_PROFILE_LOCKED"} else 503
+    return HTTPException(
+        status_code=status_code,
+        detail=error.info.model_dump(mode="json"),
     )
 
 

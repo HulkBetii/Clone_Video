@@ -165,6 +165,34 @@ def test_prompt_builders_enforce_rewrite_and_source_isolation_contracts():
     assert "dialogue/interview structure" in section_prompt
     assert "ElevenLabs/Minimax" in section_prompt
     assert "Aim for 110%" in section_prompt
+    validation_prompt = prompts[-1]
+    assert "MUST be JSON booleans true or false" in validation_prompt
+
+
+def test_attachment_prompts_do_not_duplicate_large_script_text():
+    brief = RewriteBrief(source_language="ja", source_title="Source", source_length=20_000)
+    source = "source-text-" * 1_000
+    draft = "draft-text-" * 1_000
+
+    validation_prompt = build_validation_prompt(
+        brief,
+        style_profile={"voice": "calm"},
+        outline={"sections": []},
+        attachment_name="validation.txt",
+    )
+    edit_prompt = build_final_edit_prompt(
+        brief,
+        style_profile={"voice": "calm"},
+        outline={"sections": []},
+        attachment_name="draft.txt",
+    )
+
+    assert source not in validation_prompt
+    assert draft not in validation_prompt
+    assert '"attachment_name":"validation.txt"' in validation_prompt
+    assert draft not in edit_prompt
+    assert '"attachment_name":"draft.txt"' in edit_prompt
+    assert "Return exactly one JSON object with a body string" in edit_prompt
 
 
 def test_length_policy_rounds_bounds_safely():

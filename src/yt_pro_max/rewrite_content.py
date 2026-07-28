@@ -416,20 +416,30 @@ def build_final_edit_prompt(
     *,
     style_profile: dict[str, Any],
     outline: dict[str, Any],
-    draft: str,
+    draft: str | None = None,
+    attachment_name: str | None = None,
 ) -> str:
     payload = {
         **_brief_payload(brief),
         "style_profile": style_profile,
         "outline": outline,
-        "draft": draft,
     }
+    if attachment_name:
+        if draft is not None:
+            raise ValueError("draft and attachment_name are mutually exclusive")
+        payload["attachment_name"] = attachment_name
+        payload["attachment_format"] = "UTF-8 plain text containing the complete draft"
+    else:
+        if draft is None:
+            raise ValueError("draft or attachment_name is required")
+        payload["draft"] = draft
     return _prompt(
         "Edit the complete draft into one continuous TTS-ready script.",
         payload,
         _rewrite_rules()
         + " Remove duplicated transitions and section seams without shortening below the source. "
-        "Return JSON with body only; do not create the title yet.",
+        "Treat the attachment or inline draft as DRAFT. Return exactly one JSON object with a "
+        "body string; never return labels, Markdown, or commentary. Do not create the title yet.",
     )
 
 
@@ -487,16 +497,25 @@ def build_validation_prompt(
     *,
     style_profile: dict[str, Any],
     outline: dict[str, Any],
-    source_text: str,
-    draft: str,
+    source_text: str | None = None,
+    draft: str | None = None,
+    attachment_name: str | None = None,
 ) -> str:
     payload = {
         **_brief_payload(brief),
         "style_profile": style_profile,
         "outline": outline,
-        "source_text": source_text,
-        "draft": draft,
     }
+    if attachment_name:
+        if source_text is not None or draft is not None:
+            raise ValueError("inline validation text and attachment_name are mutually exclusive")
+        payload["attachment_name"] = attachment_name
+        payload["attachment_format"] = "UTF-8 text with SOURCE and DRAFT sections"
+    else:
+        if source_text is None or draft is None:
+            raise ValueError("source_text and draft are required without an attachment")
+        payload["source_text"] = source_text
+        payload["draft"] = draft
     return _prompt(
         "Act as an independent validator, not the writer. Compare the draft with the source and "
         "outline.",
@@ -504,7 +523,10 @@ def build_validation_prompt(
         "Return JSON with passed, language_match, style_score, coverage_score, tts_ready, "
         "unsupported_claims, missing_points, and targeted_repairs. Pass only when style and "
         "content "
-        "coverage are faithful, all key points are covered, and the script is TTS-ready.",
+        "coverage are faithful, all key points are covered, and the script is TTS-ready. "
+        "The values for passed, language_match, and tts_ready MUST be JSON booleans true or "
+        "false, never prose or explanatory strings. Use numbers from 0 to 100 for both scores "
+        "and arrays for all issue/repair fields.",
     )
 
 

@@ -1,0 +1,46 @@
+export const workspace = {
+  id: "source-001",
+  status: "completed",
+  phase: "completed",
+  progress: 100,
+  auto_rewrite: true,
+  request_url: "https://www.youtube.com/watch?v=video001",
+  transcript: {
+    id: "source-001",
+    request_url: "https://www.youtube.com/watch?v=video001",
+    auto_rewrite_requested: true,
+    status: "completed",
+    stage: "rendering",
+    progress: 100,
+    source: "manual_caption",
+    requested_language: null,
+    language: "ja",
+    language_confidence: null,
+    video: { id: "video001", title: "Tiêu đề video gốc", channel: "Demo channel", duration_seconds: 300, webpage_url: "https://youtube.com/watch?v=video001" },
+    artifacts: { txt: "/api/v1/transcript-jobs/source-001/artifacts/txt", srt: "/api/v1/transcript-jobs/source-001/artifacts/srt", json: "/api/v1/transcript-jobs/source-001/artifacts/json" },
+    warnings: [], error: null, cached: false, created_at: "2026-07-27T10:00:00Z", updated_at: "2026-07-27T10:03:00Z",
+  },
+  rewrite: {
+    id: "rewrite-001", transcript_job_id: "source-001", status: "completed", stage: "rendering", progress: 100,
+    video: { id: "video001", title: "Tiêu đề video gốc", channel: "Demo channel", duration_seconds: 300, webpage_url: "https://youtube.com/watch?v=video001" },
+    language: "ja", source_length: 100, output_length: 112, sections_completed: 1, sections_total: 1, title: "Tiêu đề SEO mới",
+    validation: { passed: true, style_score: 92, coverage_score: 95, language_match: true, tts_ready: true, unsupported_claims: [], missing_points: [], length_ratio: 1.12 },
+    artifacts: { txt: "/api/v1/rewrite-jobs/rewrite-001/artifacts/txt" }, warnings: [], error: null, cached: false,
+    created_at: "2026-07-27T10:03:00Z", updated_at: "2026-07-27T10:12:00Z",
+  },
+  action_required: null,
+  created_at: "2026-07-27T10:00:00Z",
+  updated_at: "2026-07-27T10:12:00Z",
+};
+
+export const health = {
+  status: "ok",
+  checks: {
+    sqlite: true,
+    yt_dlp: "2026.7.4",
+    ffmpeg: true,
+    ffprobe: true,
+    whisper: { available: true, device: "cpu", model: "turbo", cuda_runtime_available: false },
+    gpt_rewrite: { profile_id: "PROFILE_GPT_1", profile_exists: true, browser_running: true },
+  },
+};
