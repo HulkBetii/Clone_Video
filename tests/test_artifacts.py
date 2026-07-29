@@ -118,7 +118,7 @@ def test_render_artifacts_writes_utf8_srt_txt_and_json(tmp_path: Path):
     assert files["txt"].name == "Demo_ Video_.dQw4w9WgXcQ.vi.txt"
     assert files["json"].name == "Demo_ Video_.dQw4w9WgXcQ.vi.json"
     artifact = json.loads(files["json"].read_text(encoding="utf-8"))
-    assert artifact["schema_version"] == 1
+    assert artifact["schema_version"] == 3
     assert artifact["segments"][0]["index"] == 1
 
 

@@ -17,6 +17,7 @@ LANGUAGE_DETECTION_SAMPLE_SECONDS = 90
 LANGUAGE_DETECTION_SEGMENTS = 3
 LANGUAGE_DETECTION_TIMEOUT_SECONDS = 120
 WHISPER_SAMPLE_RATE = 16_000
+WINDOW_EXTRACTION_TIMEOUT_SECONDS = 180
 
 
 @dataclass(frozen=True)
@@ -33,8 +34,10 @@ class WhisperTranscriber:
         self._model = None
         self._device: str | None = None
         self._compute_type: str | None = None
+        self._models: dict[str, object] = {}
+        self._model_runtimes: dict[str, tuple[str, str]] = {}
         self._warnings: list[str] = []
-        self._gpu_failed = False
+        self._gpu_failed_models: set[str] = set()
         self._cuda_dll_handle = _configure_cuda_dll_directory(settings.cuda_dll_dir)
 
     def transcribe(
@@ -42,10 +45,16 @@ class WhisperTranscriber:
         audio_path: Path,
         *,
         language: str | None = None,
+        model_name: str | None = None,
+        detect_language: bool = True,
         progress_callback: Callable[[int], None] | None = None,
     ) -> TranscriptionResult:
-        language_sample = _load_language_sample(audio_path) if language else None
-        model = self._load_model()
+        resolved_model_name = model_name or self.settings.whisper_model
+        language_sample = (
+            _load_language_sample(audio_path) if language and detect_language else None
+        )
+        model = self._load_model(resolved_model_name)
+        model_device, _compute_type = self._model_runtimes[resolved_model_name]
         detected_language: str | None = None
         detected_confidence: float | None = None
         try:
@@ -97,18 +106,23 @@ class WhisperTranscriber:
         except PipelineError:
             raise
         except Exception as error:
-            if self._device == "cuda":
+            if model_device == "cuda":
                 warning = "GPU_TRANSCRIPTION_FAILED_CPU_FALLBACK"
                 if warning not in self._warnings:
                     self._warnings.append(warning)
                 LOGGER.warning("CUDA transcription failed; retrying on CPU: %s", error)
-                self._model = None
-                self._device = None
-                self._compute_type = None
-                self._gpu_failed = True
+                self._models.pop(resolved_model_name, None)
+                self._model_runtimes.pop(resolved_model_name, None)
+                self._gpu_failed_models.add(resolved_model_name)
+                if resolved_model_name == self.settings.whisper_model:
+                    self._model = None
+                    self._device = None
+                    self._compute_type = None
                 return self.transcribe(
                     audio_path,
                     language=language,
+                    model_name=resolved_model_name,
+                    detect_language=detect_language,
                     progress_callback=progress_callback,
                 )
             LOGGER.exception("Whisper transcription failed")
@@ -121,9 +135,9 @@ class WhisperTranscriber:
                 "NO_SPEECH_DETECTED", "No speech was detected in the downloaded audio."
             )
 
-        result_language = str(
-            detected_language or getattr(info, "language", "") or ""
-        ).strip().lower()
+        result_language = (
+            str(detected_language or getattr(info, "language", "") or "").strip().lower()
+        )
         if not result_language:
             raise PipelineError(
                 "TRANSCRIPTION_FAILED", "Whisper did not identify a spoken language."
@@ -139,6 +153,34 @@ class WhisperTranscriber:
             language_confidence=confidence,
             segments=segments,
             warnings=warnings,
+        )
+
+    def transcribe_window(
+        self,
+        audio_path: Path,
+        *,
+        start_ms: int,
+        end_ms: int,
+        language: str,
+        model_name: str,
+        output_dir: Path,
+    ) -> TranscriptionResult:
+        if end_ms <= start_ms:
+            raise ValueError("end_ms must be greater than start_ms")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        window_path = output_dir / f"reconciliation-{start_ms}-{end_ms}.wav"
+        _extract_audio_window(audio_path, window_path, start_ms=start_ms, end_ms=end_ms)
+        result = self.transcribe(
+            window_path,
+            language=language,
+            model_name=model_name,
+            detect_language=False,
+        )
+        return TranscriptionResult(
+            language=result.language,
+            language_confidence=result.language_confidence,
+            segments=[_offset_segment(segment, start_ms) for segment in result.segments],
+            warnings=result.warnings,
         )
 
     def health(self) -> dict[str, object]:
@@ -162,9 +204,10 @@ class WhisperTranscriber:
             result["runtime_error"] = type(error).__name__
         return result
 
-    def _load_model(self):
-        if self._model is not None:
-            return self._model
+    def _load_model(self, model_name: str | None = None):
+        resolved_model_name = model_name or self.settings.whisper_model
+        if resolved_model_name in self._models:
+            return self._models[resolved_model_name]
         try:
             from faster_whisper import WhisperModel
         except Exception as error:
@@ -173,34 +216,55 @@ class WhisperTranscriber:
                 "MODEL_LOAD_FAILED", "The local Whisper model could not be loaded."
             ) from error
 
-        if not self._gpu_failed and self.settings.whisper_device in {"auto", "cuda"}:
+        if resolved_model_name not in self._gpu_failed_models and self.settings.whisper_device in {
+            "auto",
+            "cuda",
+        }:
             try:
-                self._model = WhisperModel(
-                    self.settings.whisper_model,
+                model = WhisperModel(
+                    resolved_model_name,
                     device="cuda",
                     compute_type=self.settings.gpu_compute_type,
                 )
-                self._device = "cuda"
-                self._compute_type = self.settings.gpu_compute_type
-                return self._model
+                self._store_model(
+                    resolved_model_name,
+                    model,
+                    device="cuda",
+                    compute_type=self.settings.gpu_compute_type,
+                )
+                return model
             except Exception as error:
-                self._warnings.append("GPU_RUNTIME_UNAVAILABLE_CPU_FALLBACK")
+                warning = "GPU_RUNTIME_UNAVAILABLE_CPU_FALLBACK"
+                if warning not in self._warnings:
+                    self._warnings.append(warning)
                 LOGGER.warning("CUDA Whisper runtime unavailable; using CPU fallback: %s", error)
 
         try:
-            self._model = WhisperModel(
-                self.settings.whisper_model,
+            model = WhisperModel(
+                resolved_model_name,
                 device="cpu",
                 compute_type=self.settings.cpu_compute_type,
             )
-            self._device = "cpu"
-            self._compute_type = self.settings.cpu_compute_type
-            return self._model
+            self._store_model(
+                resolved_model_name,
+                model,
+                device="cpu",
+                compute_type=self.settings.cpu_compute_type,
+            )
+            return model
         except Exception as error:
             LOGGER.exception("Unable to load Whisper model")
             raise PipelineError(
                 "MODEL_LOAD_FAILED", "The local Whisper model could not be loaded."
             ) from error
+
+    def _store_model(self, model_name: str, model, *, device: str, compute_type: str) -> None:
+        self._models[model_name] = model
+        self._model_runtimes[model_name] = (device, compute_type)
+        if model_name == self.settings.whisper_model:
+            self._model = model
+            self._device = device
+            self._compute_type = compute_type
 
 
 def _to_words(raw_words) -> list[WordTimestamp] | None:
@@ -273,6 +337,77 @@ def _load_language_sample(audio_path: Path):
             "Local Whisper language detection could not read the downloaded audio.",
             details={"stage": "language_detection"},
         ) from error
+
+
+def _extract_audio_window(
+    audio_path: Path,
+    output_path: Path,
+    *,
+    start_ms: int,
+    end_ms: int,
+) -> None:
+    duration_ms = end_ms - start_ms
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(audio_path),
+        "-ss",
+        f"{start_ms / 1000:.3f}",
+        "-t",
+        f"{duration_ms / 1000:.3f}",
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        str(WHISPER_SAMPLE_RATE),
+        "-c:a",
+        "pcm_s16le",
+        str(output_path),
+    ]
+    try:
+        subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            timeout=WINDOW_EXTRACTION_TIMEOUT_SECONDS,
+        )
+    except Exception as error:
+        LOGGER.exception(
+            "Unable to extract reconciliation audio window start_ms=%s end_ms=%s",
+            start_ms,
+            end_ms,
+        )
+        raise PipelineError(
+            "TRANSCRIPTION_FAILED",
+            "The suspicious audio span could not be prepared for verification.",
+            details={"stage": "reconciliation_audio", "start_ms": start_ms, "end_ms": end_ms},
+        ) from error
+
+
+def _offset_segment(segment: TranscriptSegment, offset_ms: int) -> TranscriptSegment:
+    words = None
+    if segment.words:
+        words = [
+            word.model_copy(
+                update={
+                    "start_ms": word.start_ms + offset_ms,
+                    "end_ms": word.end_ms + offset_ms,
+                }
+            )
+            for word in segment.words
+        ]
+    return segment.model_copy(
+        update={
+            "start_ms": segment.start_ms + offset_ms,
+            "end_ms": segment.end_ms + offset_ms,
+            "words": words,
+        }
+    )
 
 
 def _cuda_runtime_status() -> tuple[bool, str | None]:

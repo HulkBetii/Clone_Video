@@ -11,6 +11,7 @@ from pathlib import Path
 from yt_pro_max.errors import PipelineError
 from yt_pro_max.models import (
     TranscriptArtifact,
+    TranscriptReconciliation,
     TranscriptSegment,
     TranscriptSource,
     VideoMetadata,
@@ -256,6 +257,7 @@ def render_artifacts(
     video: VideoMetadata,
     segments: Iterable[TranscriptSegment],
     warnings: list[str],
+    reconciliation: TranscriptReconciliation | None = None,
 ) -> dict[str, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     normalized_segments = [
@@ -269,6 +271,7 @@ def render_artifacts(
         video=video,
         segments=normalized_segments,
         warnings=warnings,
+        reconciliation=reconciliation,
     )
     title = _normalize_title(video.title)
     filename_title = _safe_filename_title(title)

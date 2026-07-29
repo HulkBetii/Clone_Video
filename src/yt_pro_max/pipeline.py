@@ -9,14 +9,22 @@ from pathlib import Path
 from yt_pro_max.artifacts import parse_vtt, render_artifacts
 from yt_pro_max.config import Settings
 from yt_pro_max.errors import PipelineError
-from yt_pro_max.models import JobStage, TranscriptSource, VideoMetadata
+from yt_pro_max.models import (
+    JobStage,
+    TranscriptReconciliation,
+    TranscriptSegment,
+    TranscriptSource,
+    VideoMetadata,
+)
+from yt_pro_max.reconciliation import apply_reconciliation, build_reconciliation_plan
 from yt_pro_max.transcription import WhisperTranscriber
 from yt_pro_max.url_utils import canonicalize_youtube_url
-from yt_pro_max.youtube import CaptionTrack, YouTubeClient
+from yt_pro_max.youtube import CaptionTrack, VideoInspection, YouTubeClient
 
 LOGGER = logging.getLogger(__name__)
 JAPANESE_LANGUAGE = "ja"
 JAPANESE_AUDIO_FIRST_WARNING = "JAPANESE_AUTO_CAPTION_REPLACED_BY_WHISPER"
+JAPANESE_RECONCILIATION_UNAVAILABLE = "JAPANESE_RECONCILIATION_UNAVAILABLE"
 
 
 @dataclass(frozen=True)
@@ -27,6 +35,7 @@ class PipelineOutput:
     video: VideoMetadata
     warnings: list[str]
     artifact_paths: dict[str, Path]
+    reconciliation: TranscriptReconciliation | None = None
 
 
 class TranscriptPipeline:
@@ -60,7 +69,18 @@ class TranscriptPipeline:
             track = self.youtube.select_caption_track(inspection, requested_language)
 
             warnings: list[str] = []
+            reconciliation: TranscriptReconciliation | None = None
             audio_first_language = _audio_first_language(track)
+            reference_caption_segments: list[TranscriptSegment] | None = None
+            if audio_first_language and track is not None:
+                update(JobStage.FETCHING_CAPTION, 10)
+                reference_caption_segments = _load_japanese_reference_caption(
+                    self.youtube,
+                    inspection,
+                    track,
+                    temporary_dir,
+                    warnings,
+                )
             if track and audio_first_language is None:
                 update(JobStage.FETCHING_CAPTION, 10)
                 caption_path = self.youtube.download_caption(inspection, track, temporary_dir)
@@ -69,7 +89,7 @@ class TranscriptPipeline:
                 language = track.language
                 language_confidence = None
             else:
-                update(JobStage.DOWNLOADING_AUDIO, 10)
+                update(JobStage.DOWNLOADING_AUDIO, 15 if audio_first_language else 10)
                 audio_path = self.youtube.download_audio(inspection, temporary_dir)
                 update(JobStage.LOADING_MODEL, 45)
                 transcribe_options = {
@@ -97,7 +117,75 @@ class TranscriptPipeline:
                 warnings.extend(result.warnings)
                 if audio_first_language:
                     warnings.append(JAPANESE_AUDIO_FIRST_WARNING)
+                    if reference_caption_segments:
+                        plan = build_reconciliation_plan(
+                            result.segments,
+                            reference_caption_segments,
+                            self.settings,
+                        )
+                        secondary_by_window: dict[int, list[TranscriptSegment]] = {}
+                        transcribe_window = getattr(self.transcriber, "transcribe_window", None)
+                        if plan.windows and transcribe_window is None:
+                            warnings.append(JAPANESE_RECONCILIATION_UNAVAILABLE)
+                        elif transcribe_window is not None:
+                            reconciliation_dir = temporary_dir / "reconciliation"
+                            window_count = len(plan.windows)
+                            for window_position, window in enumerate(plan.windows, start=1):
+                                try:
+                                    secondary = transcribe_window(
+                                        audio_path,
+                                        start_ms=window.start_ms,
+                                        end_ms=window.end_ms,
+                                        language=audio_first_language,
+                                        model_name=self.settings.reconciliation_model,
+                                        output_dir=reconciliation_dir,
+                                    )
+                                    if _base_language(secondary.language) != audio_first_language:
+                                        raise PipelineError(
+                                            "TRANSCRIPTION_LANGUAGE_MISMATCH",
+                                            "Secondary Whisper verification returned a "
+                                            "different language.",
+                                            details={
+                                                "expected_language": audio_first_language,
+                                                "actual_language": secondary.language,
+                                            },
+                                    )
+                                    secondary_by_window[window.index] = secondary.segments
+                                    warnings.extend(secondary.warnings)
+                                    update(
+                                        JobStage.TRANSCRIBING,
+                                        90 + min(4, (window_position * 5) // window_count),
+                                    )
+                                except PipelineError as error:
+                                    LOGGER.warning(
+                                        "Japanese reconciliation window failed index=%s code=%s",
+                                        window.index,
+                                        error.info.code,
+                                    )
+                                    warnings.append(JAPANESE_RECONCILIATION_UNAVAILABLE)
+                                    if error.info.code in {
+                                        "MODEL_LOAD_FAILED",
+                                        "TRANSCRIPTION_LANGUAGE_MISMATCH",
+                                    }:
+                                        break
+                                except Exception as error:
+                                    LOGGER.warning(
+                                        "Unexpected Japanese reconciliation failure index=%s: %s",
+                                        window.index,
+                                        error,
+                                    )
+                                    warnings.append(JAPANESE_RECONCILIATION_UNAVAILABLE)
+                        outcome = apply_reconciliation(
+                            result.segments,
+                            plan,
+                            secondary_by_window,
+                            self.settings,
+                        )
+                        segments = outcome.segments
+                        reconciliation = outcome.reconciliation
+                        warnings.extend(outcome.warnings)
 
+            warnings = list(dict.fromkeys(warnings))
             update(JobStage.RENDERING, 95)
             staged_artifact_paths = render_artifacts(
                 output_dir=artifact_staging_dir,
@@ -108,6 +196,7 @@ class TranscriptPipeline:
                 video=inspection.metadata,
                 segments=segments,
                 warnings=warnings,
+                reconciliation=reconciliation,
             )
             if output_dir.exists():
                 shutil.rmtree(output_dir)
@@ -124,6 +213,7 @@ class TranscriptPipeline:
                 video=inspection.metadata,
                 warnings=warnings,
                 artifact_paths=artifact_paths,
+                reconciliation=reconciliation,
             )
         finally:
             if temporary_dir.exists():
@@ -142,3 +232,19 @@ def _audio_first_language(track: CaptionTrack | None) -> str | None:
 
 def _base_language(language: str) -> str:
     return language.strip().lower().split("-", 1)[0]
+
+
+def _load_japanese_reference_caption(
+    youtube: YouTubeClient,
+    inspection: VideoInspection,
+    track: CaptionTrack,
+    temporary_dir: Path,
+    warnings: list[str],
+) -> list[TranscriptSegment] | None:
+    try:
+        caption_path = youtube.download_caption(inspection, track, temporary_dir)
+        return parse_vtt(caption_path)
+    except PipelineError as error:
+        LOGGER.warning("Japanese caption reference unavailable: %s", error.info.code)
+        warnings.append(JAPANESE_RECONCILIATION_UNAVAILABLE)
+        return None

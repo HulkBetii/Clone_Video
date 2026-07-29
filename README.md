@@ -100,6 +100,9 @@ Remove that first metadata line before sending the body to ElevenLabs or Minimax
 - Manual captions are preferred over automatic captions.
 - A requested language must have a matching caption track; the backend does not silently translate or switch languages.
 - Automatic Japanese captions are bypassed in favor of audio-first local Whisper transcription with a forced `ja` hint, VAD, and word timestamps. If audio/model transcription fails, the job fails safely instead of returning the caption track.
+- Japanese auto-caption tracks are also retained temporarily as a timestamped reference. Low-confidence or materially different Whisper spans are rechecked with the configured `large-v3` model; only caption + secondary-model consensus can correct text. Ambiguous spans keep primary Whisper text and are recorded in JSON reconciliation audit metadata.
+- Japanese reconciliation aligns caption characters to Whisper word timestamps in monotonic 60-second windows with 5-second overlap, prioritizes low-confidence spans, and bounds verification to 60 windows or 10 minutes per job.
+- Reconciliation artifacts use schema version `3`; transcript cache keys use pipeline version `4` and include the secondary model profile. Selected and successfully processed secondary windows are reported separately from budget-skipped spans.
 - Without a requested language, missing captions trigger local Whisper transcription. Automatic captions for non-Japanese languages keep the caption-first behavior.
 - Whisper loads lazily on the first audio transcription. `CUDA ready` with `loaded=false` means the runtime is available and the configured model will download/load when needed.
 - Public and unlisted videos are supported. Private, members-only, restricted, unavailable, playlist-only, upcoming, and active livestream URLs return classified errors.

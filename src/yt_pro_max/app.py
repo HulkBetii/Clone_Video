@@ -156,6 +156,7 @@ def create_app(
             request.language,
             app_settings.pipeline_version,
             app_settings.whisper_model,
+            app_settings.reconciliation_model,
         )
         if not request.force_refresh:
             cached_job = app_repository.find_completed(cache_key)
@@ -568,9 +569,16 @@ def create_app(
 
 
 def _cache_key(
-    video_id: str, language: str | None, pipeline_version: str, whisper_model: str
+    video_id: str,
+    language: str | None,
+    pipeline_version: str,
+    whisper_model: str,
+    reconciliation_model: str = "large-v3",
 ) -> str:
-    return f"v{pipeline_version}:{video_id}:{language or '__auto__'}:{whisper_model}"
+    return (
+        f"v{pipeline_version}:{video_id}:{language or '__auto__'}:"
+        f"{whisper_model}:{reconciliation_model}"
+    )
 
 
 def _artifacts_exist(job: StoredJob) -> bool:

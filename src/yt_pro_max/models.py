@@ -262,8 +262,51 @@ class TranscriptSegment(BaseModel):
     words: list[WordTimestamp] | None = None
 
 
+class TranscriptReconciliationItem(BaseModel):
+    segment_index: int
+    start_ms: int
+    end_ms: int
+    primary_text: str
+    caption_text: str | None = None
+    secondary_text: str | None = None
+    final_text: str
+    decision: str
+    triggers: list[str] = Field(default_factory=list)
+    word_start: int | None = None
+    word_end: int | None = None
+    priority_tier: int | None = None
+    alignment_coverage: float | None = None
+    temporal_overlap: float | None = None
+    primary_probability: float | None = None
+    secondary_mean_probability: float | None = None
+    secondary_min_probability: float | None = None
+    decision_reason: str | None = None
+    corrected_words: int = 0
+
+
+class TranscriptReconciliation(BaseModel):
+    strategy: str = "conservative_consensus"
+    alignment_version: str = "monotonic_char_word_v1"
+    reference_source: str = "youtube_automatic_caption"
+    secondary_model: str
+    alignment_coverage: float | None = None
+    compared_segments: int = 0
+    suspicious_segments: int = 0
+    selected_spans: int = 0
+    processed_spans: int = 0
+    selected_windows: int = 0
+    selected_duration_ms: int = 0
+    secondary_windows: int = 0
+    secondary_duration_ms: int = 0
+    corrected_segments: int = 0
+    corrected_words: int = 0
+    unresolved_segments: int = 0
+    skipped_segments: int = 0
+    items: list[TranscriptReconciliationItem] = Field(default_factory=list)
+
+
 class TranscriptArtifact(BaseModel):
-    schema_version: int = 1
+    schema_version: int = 3
     job_id: str
     source: TranscriptSource
     language: str
@@ -271,3 +314,4 @@ class TranscriptArtifact(BaseModel):
     video: VideoMetadata
     segments: list[TranscriptSegment]
     warnings: list[str] = Field(default_factory=list)
+    reconciliation: TranscriptReconciliation | None = None

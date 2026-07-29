@@ -133,3 +133,31 @@ def test_configured_cuda_dll_directory_is_registered(settings, monkeypatch, tmp_
     assert transcriber._cuda_dll_handle is fake_handle
     assert os.environ["PATH"].split(os.pathsep)[0] == str(tmp_path)
     monkeypatch.setenv("PATH", original_path)
+
+
+def test_transcribe_window_uses_secondary_model_and_offsets_timestamps(
+    settings, monkeypatch, tmp_path
+):
+    FakeModel.calls = []
+    FakeModel.transcribe_calls = []
+    settings.whisper_device = "cpu"
+    monkeypatch.setattr("faster_whisper.WhisperModel", FakeModel)
+    monkeypatch.setattr(
+        "yt_pro_max.transcription._extract_audio_window",
+        lambda _audio, output, **_kwargs: output.touch(),
+    )
+    transcriber = WhisperTranscriber(settings)
+
+    result = transcriber.transcribe_window(
+        tmp_path / "audio.webm",
+        start_ms=5_000,
+        end_ms=8_000,
+        language="ja",
+        model_name="large-v3",
+        output_dir=tmp_path / "windows",
+    )
+
+    assert FakeModel.calls == [("large-v3", "cpu", "int8")]
+    assert FakeModel.transcribe_calls[0][1]["language"] == "ja"
+    assert result.segments[0].start_ms == 5_000
+    assert result.segments[0].words[0].start_ms == 5_100

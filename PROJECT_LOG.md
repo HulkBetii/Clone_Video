@@ -189,3 +189,23 @@ Keep the backend/UI release stable while adding future workspace stages. Whisper
 - Real smoke `fa65a160-691f-4e90-880f-d361a79bb757` for `bgSqJPlQbSM` completed with `source=whisper`, `language=ja`, confidence `0.9990234375`, `667` segments, word timestamps on all segments, and warning `JAPANESE_AUTO_CAPTION_REPLACED_BY_WHISPER`.
 - The audio-first artifact is `data/jobs/fa65a160-691f-4e90-880f-d361a79bb757/【美輪明宏】夜中の同じ時間に目覚める人、実は〇〇なのよ。誰も言わなかった本当の理由。_偉人_名言_言葉の力_人生哲学_.bgSqJPlQbSM.ja.json`; audio-first improves timing/source grounding but does not correct every Japanese homophone or proper noun automatically.
 - Verification: full Python suite `123 passed, 2 skipped`; Ruff and diff checks passed.
+
+### 2026-07-29 - Conservative Japanese transcript reconciliation
+
+- Japanese automatic-caption jobs now download a temporary caption reference alongside audio, while manual Japanese captions and non-Japanese caption paths remain unchanged.
+- Suspicious Whisper spans are detected from timestamp-aligned caption disagreement or low word probability, merged into bounded padded windows, and rechecked with `large-v3`.
+- Text is corrected only when normalized caption and secondary Whisper evidence agree; ambiguous spans keep primary Whisper text and receive unresolved audit warnings. No GPT guessing is used.
+- JSON artifacts now use schema version 2 and include reconciliation strategy, model, counts, per-span decisions, source/caption/secondary text, and final text. SRT/TXT publish only the final Whisper/reconciled output.
+- Transcript cache version is `3` and includes both primary and reconciliation model profiles. Reference/secondary failures preserve a valid Whisper transcript with classified warnings.
+- Real smoke `47ba0dfb-b509-4fd5-80fb-b65655c913ad` for `bgSqJPlQbSM` completed with `source=whisper`, `language=ja`, 667 segments, 459 suspicious spans, 18 bounded secondary windows, 0 automatic corrections, 32 unresolved spans, and 404 budget-skipped spans. The known `太目`/`太め`/`ふと目` case stayed unchanged by design because two-source evidence was not unanimous.
+- Verification: Python `134 passed, 2 skipped`; Ruff check and git diff checks passed.
+
+### 2026-07-29 - Japanese reconciliation v2 alignment and smoke
+
+- Reconciliation now uses one global monotonic character timeline across Whisper segments, merges compatible anchors from overlapping 60-second windows, and aligns each `large-v3` result back to the exact primary word range. Partial secondary words, neighbor leakage, low local coverage, low temporal overlap, and low confidence remain unresolved.
+- Artifact schema is `3`; transcript cache pipeline version is `4`; the default verification budget is 60 windows and 600,000 ms. Audit records selected/processed windows and durations separately from budget-skipped spans.
+- Final real smoke job `b866a194-96ae-41f7-9b10-80124d89bf27` for `bgSqJPlQbSM` completed in about 275 seconds with `source=whisper`, `language=ja`, confidence `0.9990234375`, 669 segments, and word timestamps on every segment.
+- Smoke audit: alignment coverage `0.9596364`, 296 suspicious spans, 199 selected, 199 processed, 97 budget-skipped, 60 selected/processed windows, selected/processed secondary duration `498320 ms`, 16 primary-consensus spans, 183 unresolved spans, and 0 corrected words/segments.
+- No reconciliation correction was published because no selected span met every conservative gate with exact caption + `large-v3` local consensus. The first `太目`/`太め`/`ふと目` case stayed `太目`; its local caption was `め`, secondary text was `目`, and temporal overlap was `0.5`. `受討` and `老化` disagreement spans were observed but skipped by the priority budget in this run; their final text remained unchanged.
+- Compared with Whisper baseline job `47ba0dfb-b509-4fd5-80fb-b65655c913ad`, all 667 shared segment indexes retained the same text; the refreshed run added one terminal segment, not a reconciliation edit. Auto-caption baseline job `6801857c-060f-4261-84cb-23b8d1d957e7` contains `太め` while the published final artifact retains `太目`.
+- Verification: Python `151 passed, 2 skipped`; Ruff and `git diff --check` passed.
