@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     data_dir: Path = Path("data")
     max_duration_seconds: int = 6 * 60 * 60
     youtube_retries: int = 3
-    pipeline_version: str = "4"
+    pipeline_version: str = "6"
     whisper_model: str = "turbo"
     reconciliation_model: str = "large-v3"
     whisper_device: str = "auto"
@@ -35,7 +35,9 @@ class Settings(BaseSettings):
     reconciliation_window_merge_gap_ms: int = 1_500
     reconciliation_window_max_ms: int = 20_000
     reconciliation_max_windows: int = 60
+    reconciliation_korean_max_windows: int = 100
     reconciliation_max_total_ms: int = 600_000
+    reconciliation_korean_temporal_overlap_tolerance: float = 0.01
     rewrite_pipeline_version: str = "1"
     rewrite_prompt_version: str = "1"
     rewrite_chunk_max_chars: int = 25_000

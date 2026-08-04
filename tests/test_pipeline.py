@@ -15,6 +15,14 @@ from yt_pro_max.transcription import TranscriptionResult
 from yt_pro_max.youtube import CaptionTrack, VideoInspection
 
 UNSET_LANGUAGE = object()
+KOREAN_PRIMARY_TEXT = (
+    "\uc624\ub298\ub0a0\uc528\ub294 \uc870\uc544\uc694 "
+    "\uc815\ub9d0\uc88b\ub124\uc694"
+)
+KOREAN_CORRECTED_TEXT = (
+    "\uc624\ub298\ub0a0\uc528\ub294 \uc88b\uc544\uc694 "
+    "\uc815\ub9d0\uc88b\ub124\uc694"
+)
 
 
 class FakeYouTubeClient:
@@ -261,6 +269,95 @@ class FailingReconciliationTranscriber(JapaneseReconcilingTranscriber):
         raise PipelineError("MODEL_LOAD_FAILED", "Secondary model failed.")
 
 
+class KoreanReconcilingTranscriber(FakeTranscriber):
+    def transcribe(self, audio_path, *, language=UNSET_LANGUAGE, progress_callback):
+        self.called = True
+        if language is not UNSET_LANGUAGE:
+            self.language_hints.append(language)
+        return TranscriptionResult(
+            language="ko",
+            language_confidence=0.99,
+            segments=[
+                TranscriptSegment(
+                    index=1,
+                    start_ms=0,
+                    end_ms=1_200,
+                    text=KOREAN_PRIMARY_TEXT,
+                    words=[
+                        WordTimestamp(
+                            start_ms=0,
+                            end_ms=400,
+                            text="\uc624\ub298\ub0a0\uc528\ub294",
+                            probability=0.98,
+                        ),
+                        WordTimestamp(
+                            start_ms=400,
+                            end_ms=750,
+                            text=" \uc870\uc544\uc694",
+                            probability=0.40,
+                        ),
+                        WordTimestamp(
+                            start_ms=750,
+                            end_ms=1_200,
+                            text=" \uc815\ub9d0\uc88b\ub124\uc694",
+                            probability=0.98,
+                        ),
+                    ],
+                )
+            ],
+            warnings=[],
+        )
+
+    def transcribe_window(
+        self,
+        audio_path,
+        *,
+        start_ms,
+        end_ms,
+        language,
+        model_name,
+        output_dir,
+    ):
+        return TranscriptionResult(
+            language="ko",
+            language_confidence=0.99,
+            segments=[
+                TranscriptSegment(
+                    index=1,
+                    start_ms=0,
+                    end_ms=1_200,
+                    text=KOREAN_CORRECTED_TEXT,
+                    words=[
+                        WordTimestamp(
+                            start_ms=0,
+                            end_ms=400,
+                            text="\uc624\ub298\ub0a0\uc528\ub294",
+                            probability=0.98,
+                        ),
+                        WordTimestamp(
+                            start_ms=400,
+                            end_ms=750,
+                            text=" \uc88b\uc544\uc694",
+                            probability=0.98,
+                        ),
+                        WordTimestamp(
+                            start_ms=750,
+                            end_ms=1_200,
+                            text=" \uc815\ub9d0\uc88b\ub124\uc694",
+                            probability=0.98,
+                        ),
+                    ],
+                )
+            ],
+            warnings=[],
+        )
+
+
+class FailingKoreanReconciliationTranscriber(KoreanReconcilingTranscriber):
+    def transcribe_window(self, *args, **kwargs):
+        raise PipelineError("MODEL_LOAD_FAILED", "Secondary model failed.")
+
+
 def test_pipeline_uses_caption_without_downloading_audio(settings):
     youtube = FakeYouTubeClient(
         caption_track=CaptionTrack(
@@ -311,6 +408,28 @@ def test_pipeline_keeps_manual_japanese_caption(settings):
     assert not transcriber.called
 
 
+def test_pipeline_keeps_manual_korean_caption(settings):
+    youtube = FakeYouTubeClient(
+        caption_track=CaptionTrack(
+            language="ko",
+            provider_language="ko",
+            source=TranscriptSource.MANUAL_CAPTION,
+        )
+    )
+    transcriber = FakeTranscriber(language="ko")
+
+    result = TranscriptPipeline(settings, youtube=youtube, transcriber=transcriber).process(
+        job_id="manual-ko-job",
+        request_url="https://youtu.be/dQw4w9WgXcQ",
+        requested_language=None,
+        update=lambda *_args: None,
+    )
+
+    assert result.source == TranscriptSource.MANUAL_CAPTION
+    assert not youtube.audio_downloaded
+    assert not transcriber.called
+
+
 @pytest.mark.parametrize("caption_language", ["ja", "ja-JP", "ja-orig"])
 def test_pipeline_uses_whisper_for_japanese_automatic_caption(settings, caption_language):
     youtube = FakeYouTubeClient(
@@ -349,7 +468,34 @@ def test_pipeline_uses_whisper_for_japanese_automatic_caption(settings, caption_
     assert artifact["warnings"] == ["JAPANESE_AUTO_CAPTION_REPLACED_BY_WHISPER"]
 
 
-def test_pipeline_keeps_non_japanese_automatic_caption(settings):
+@pytest.mark.parametrize("caption_language", ["ko", "ko-KR", "ko-orig"])
+def test_pipeline_uses_whisper_for_korean_automatic_caption(settings, caption_language):
+    youtube = FakeYouTubeClient(
+        caption_track=CaptionTrack(
+            language=caption_language,
+            provider_language=caption_language,
+            source=TranscriptSource.AUTOMATIC_CAPTION,
+        ),
+        caption_text="Whisper",
+    )
+    transcriber = FakeTranscriber(language="ko")
+
+    result = TranscriptPipeline(settings, youtube=youtube, transcriber=transcriber).process(
+        job_id=f"audio-first-{caption_language}",
+        request_url="https://youtu.be/dQw4w9WgXcQ",
+        requested_language=None,
+        update=lambda *_args: None,
+    )
+
+    assert result.source == TranscriptSource.WHISPER
+    assert result.language == "ko"
+    assert youtube.audio_downloaded
+    assert youtube.caption_downloaded
+    assert transcriber.language_hints == ["ko"]
+    assert result.warnings == ["KOREAN_AUTO_CAPTION_REPLACED_BY_WHISPER"]
+
+
+def test_pipeline_keeps_other_automatic_caption(settings):
     youtube = FakeYouTubeClient(
         caption_track=CaptionTrack(
             language="en",
@@ -399,7 +545,7 @@ def test_pipeline_applies_conservative_japanese_reconciliation(settings):
     artifact = json.loads(result.artifact_paths["json"].read_text(encoding="utf-8"))
     assert artifact["schema_version"] == 3
     assert artifact["reconciliation"]["secondary_model"] == settings.reconciliation_model
-    assert artifact["reconciliation"]["alignment_version"] == "monotonic_char_word_v1"
+    assert artifact["reconciliation"]["alignment_version"] == "monotonic_char_word_v3"
     assert artifact["reconciliation"]["selected_spans"] == 1
     assert artifact["reconciliation"]["processed_spans"] == 1
     assert artifact["reconciliation"]["corrected_words"] == 1
@@ -499,6 +645,90 @@ def test_pipeline_keeps_primary_when_secondary_reconciliation_fails(settings):
     assert result.reconciliation.unresolved_segments == 1
 
 
+def test_pipeline_applies_conservative_korean_reconciliation(settings):
+    youtube = FakeYouTubeClient(
+        caption_track=CaptionTrack(
+            language="ko",
+            provider_language="ko-orig",
+            source=TranscriptSource.AUTOMATIC_CAPTION,
+        ),
+        caption_text=KOREAN_CORRECTED_TEXT,
+    )
+
+    result = TranscriptPipeline(
+        settings,
+        youtube=youtube,
+        transcriber=KoreanReconcilingTranscriber(),
+    ).process(
+        job_id="audio-first-korean-reconciled",
+        request_url="https://youtu.be/dQw4w9WgXcQ",
+        requested_language=None,
+        update=lambda *_args: None,
+    )
+
+    assert result.source == TranscriptSource.WHISPER
+    assert result.language == "ko"
+    assert result.reconciliation is not None
+    assert result.reconciliation.corrected_words == 1
+    assert result.artifact_paths["txt"].read_text(encoding="utf-8").endswith(
+        f"{KOREAN_CORRECTED_TEXT}\n"
+    )
+    assert "KOREAN_TRANSCRIPT_RECONCILED" in result.warnings
+
+
+def test_pipeline_keeps_korean_whisper_when_caption_reference_fails(settings):
+    youtube = FailingCaptionYouTubeClient(
+        caption_track=CaptionTrack(
+            language="ko",
+            provider_language="ko-orig",
+            source=TranscriptSource.AUTOMATIC_CAPTION,
+        )
+    )
+
+    result = TranscriptPipeline(
+        settings,
+        youtube=youtube,
+        transcriber=FakeTranscriber(language="ko"),
+    ).process(
+        job_id="audio-first-korean-reference-failed",
+        request_url="https://youtu.be/dQw4w9WgXcQ",
+        requested_language=None,
+        update=lambda *_args: None,
+    )
+
+    assert result.source == TranscriptSource.WHISPER
+    assert "KOREAN_RECONCILIATION_UNAVAILABLE" in result.warnings
+    assert result.reconciliation is None
+
+
+def test_pipeline_keeps_korean_primary_when_secondary_reconciliation_fails(settings):
+    youtube = FakeYouTubeClient(
+        caption_track=CaptionTrack(
+            language="ko",
+            provider_language="ko-orig",
+            source=TranscriptSource.AUTOMATIC_CAPTION,
+        ),
+        caption_text=KOREAN_CORRECTED_TEXT,
+    )
+
+    result = TranscriptPipeline(
+        settings,
+        youtube=youtube,
+        transcriber=FailingKoreanReconciliationTranscriber(),
+    ).process(
+        job_id="audio-first-korean-secondary-failed",
+        request_url="https://youtu.be/dQw4w9WgXcQ",
+        requested_language=None,
+        update=lambda *_args: None,
+    )
+
+    assert result.source == TranscriptSource.WHISPER
+    assert result.reconciliation is not None
+    assert result.reconciliation.corrected_words == 0
+    assert "KOREAN_RECONCILIATION_UNAVAILABLE" in result.warnings
+    assert "KOREAN_RECONCILIATION_UNRESOLVED" in result.warnings
+
+
 def test_pipeline_falls_back_to_whisper_when_captions_are_missing(settings):
     youtube = FakeYouTubeClient(caption_track=None)
     transcriber = FakeTranscriber()
@@ -544,6 +774,32 @@ def test_pipeline_fails_japanese_audio_first_on_language_mismatch(settings):
     assert youtube.caption_downloaded
 
 
+def test_pipeline_fails_korean_audio_first_on_language_mismatch(settings):
+    youtube = FakeYouTubeClient(
+        caption_track=CaptionTrack(
+            language="ko",
+            provider_language="ko-orig",
+            source=TranscriptSource.AUTOMATIC_CAPTION,
+        )
+    )
+
+    with pytest.raises(PipelineError) as error:
+        TranscriptPipeline(
+            settings,
+            youtube=youtube,
+            transcriber=FakeTranscriber(language="en"),
+        ).process(
+            job_id="audio-first-korean-mismatch",
+            request_url="https://youtu.be/dQw4w9WgXcQ",
+            requested_language=None,
+            update=lambda *_args: None,
+        )
+
+    assert error.value.info.code == "TRANSCRIPTION_LANGUAGE_MISMATCH"
+    assert youtube.audio_downloaded
+    assert youtube.caption_downloaded
+
+
 @pytest.mark.parametrize(
     "error_code",
     ["MODEL_LOAD_FAILED", "TRANSCRIPTION_FAILED", "NO_SPEECH_DETECTED"],
@@ -566,6 +822,38 @@ def test_pipeline_never_falls_back_to_japanese_auto_caption_on_whisper_failure(
             transcriber=FailingTranscriber(error_code),
         ).process(
             job_id=f"audio-first-{error_code}",
+            request_url="https://youtu.be/dQw4w9WgXcQ",
+            requested_language=None,
+            update=lambda *_args: None,
+        )
+
+    assert error.value.info.code == error_code
+    assert youtube.audio_downloaded
+    assert youtube.caption_downloaded
+
+
+@pytest.mark.parametrize(
+    "error_code",
+    ["MODEL_LOAD_FAILED", "TRANSCRIPTION_FAILED", "NO_SPEECH_DETECTED"],
+)
+def test_pipeline_never_falls_back_to_korean_auto_caption_on_whisper_failure(
+    settings, error_code
+):
+    youtube = FakeYouTubeClient(
+        caption_track=CaptionTrack(
+            language="ko",
+            provider_language="ko-orig",
+            source=TranscriptSource.AUTOMATIC_CAPTION,
+        )
+    )
+
+    with pytest.raises(PipelineError) as error:
+        TranscriptPipeline(
+            settings,
+            youtube=youtube,
+            transcriber=FailingTranscriber(error_code),
+        ).process(
+            job_id=f"audio-first-korean-{error_code}",
             request_url="https://youtu.be/dQw4w9WgXcQ",
             requested_language=None,
             update=lambda *_args: None,

@@ -286,7 +286,7 @@ class TranscriptReconciliationItem(BaseModel):
 
 class TranscriptReconciliation(BaseModel):
     strategy: str = "conservative_consensus"
-    alignment_version: str = "monotonic_char_word_v1"
+    alignment_version: str = "monotonic_char_word_v3"
     reference_source: str = "youtube_automatic_caption"
     secondary_model: str
     alignment_coverage: float | None = None

@@ -109,7 +109,14 @@ class YouTubeClient:
                 (TranscriptSource.MANUAL_CAPTION, inspection.manual_languages),
                 (TranscriptSource.AUTOMATIC_CAPTION, inspection.automatic_languages),
             ):
-                match = _match_language(requested_language, languages)
+                match = _match_language(
+                    requested_language,
+                    languages,
+                    prefer_original=(
+                        source == TranscriptSource.AUTOMATIC_CAPTION
+                        and _base_language(requested_language) == "ko"
+                    ),
+                )
                 if match:
                     return CaptionTrack(
                         language=_normalize_language(match) or match,
@@ -135,7 +142,14 @@ class YouTubeClient:
         ]
         if original_language:
             for source, languages in candidates:
-                match = _match_language(original_language, languages)
+                match = _match_language(
+                    original_language,
+                    languages,
+                    prefer_original=(
+                        source == TranscriptSource.AUTOMATIC_CAPTION
+                        and _base_language(original_language) == "ko"
+                    ),
+                )
                 if match:
                     return CaptionTrack(
                         language=_normalize_language(match) or match,
@@ -338,20 +352,42 @@ def _normalize_language(value: Any) -> str | None:
     return "-".join([parts[0].lower(), *parts[1:]])
 
 
-def _match_language(requested: str, available: tuple[str, ...]) -> str | None:
+def _match_language(
+    requested: str,
+    available: tuple[str, ...],
+    *,
+    prefer_original: bool = False,
+) -> str | None:
     requested_normalized = _normalize_language(requested)
     if not requested_normalized:
         return None
+    requested_base = requested_normalized.split("-")[0]
+    if prefer_original:
+        original = next(
+            (
+                value
+                for value in available
+                if value.lower().endswith("-orig")
+                and _base_language(value) == requested_base.lower()
+            ),
+            None,
+        )
+        if original:
+            return original
     exact = next(
         (value for value in available if value.lower() == requested_normalized.lower()), None
     )
     if exact:
         return exact
-    requested_base = requested_normalized.split("-")[0]
     return next(
         (value for value in available if value.split("-")[0].lower() == requested_base.lower()),
         None,
     )
+
+
+def _base_language(value: str) -> str:
+    normalized = _normalize_language(value)
+    return normalized.split("-", 1)[0] if normalized else ""
 
 
 def _safe_int(value: Any) -> int | None:

@@ -53,6 +53,25 @@ def test_caption_selection_uses_original_marker_when_metadata_missing(settings):
     assert track.provider_language == "vi-orig"
 
 
+@pytest.mark.parametrize("requested_language", [None, "ko", "ko-KR"])
+def test_caption_selection_prefers_original_korean_automatic_track(
+    settings, requested_language
+):
+    client = YouTubeClient(settings)
+    track = client.select_caption_track(
+        _inspection(
+            original_language="ko",
+            automatic_languages=("ko", "ko-orig"),
+        ),
+        requested_language,
+    )
+
+    assert track is not None
+    assert track.source == TranscriptSource.AUTOMATIC_CAPTION
+    assert track.language == "ko"
+    assert track.provider_language == "ko-orig"
+
+
 def test_caption_selection_rejects_missing_requested_language(settings):
     client = YouTubeClient(settings)
     with pytest.raises(PipelineError) as error:

@@ -209,3 +209,24 @@ Keep the backend/UI release stable while adding future workspace stages. Whisper
 - No reconciliation correction was published because no selected span met every conservative gate with exact caption + `large-v3` local consensus. The first `太目`/`太め`/`ふと目` case stayed `太目`; its local caption was `め`, secondary text was `目`, and temporal overlap was `0.5`. `受討` and `老化` disagreement spans were observed but skipped by the priority budget in this run; their final text remained unchanged.
 - Compared with Whisper baseline job `47ba0dfb-b509-4fd5-80fb-b65655c913ad`, all 667 shared segment indexes retained the same text; the refreshed run added one terminal segment, not a reconciliation edit. Auto-caption baseline job `6801857c-060f-4261-84cb-23b8d1d957e7` contains `太め` while the published final artifact retains `太目`.
 - Verification: Python `151 passed, 2 skipped`; Ruff and `git diff --check` passed.
+
+### 2026-08-04 - Korean audio-first reconciliation and smoke
+
+- Extended the audio-first policy from Japanese to Korean. Manual Korean captions remain caption-first; automatic `ko`, `ko-*`, and `ko-orig` tracks use Whisper `turbo` with a forced `ko` hint and never fall back to the automatic caption after a primary Whisper failure.
+- Korean alignment uses NFKC followed by NFC, removes only known alignment noise such as `[음악]`, `[박수]`, `[웃음]`, and `[환호]`, and preserves original Whisper/`large-v3` surface text. Automatic track selection now prefers `ko-orig` over `ko` when both are available.
+- Reconciliation warning codes are language-specific, alignment version is `monotonic_char_word_v2`, artifact schema remains `3`, and transcript cache pipeline version is `5`.
+- Real smoke job `c2835f76-8cba-4a68-9ffe-2f4dd6041c25` processed `aSSO1cy5-08` with `force_refresh=true` and no requested language in about 368 seconds. It selected `ko-orig`, published `source=whisper`, `language=ko`, confidence `0.9990234375`, 503 segments, 4,439 words, and word timestamps on every segment.
+- Smoke audit: alignment coverage `0.9813496`; 149 suspicious spans; 107 selected/processed spans; 42 budget-skipped spans; 60 secondary windows covering `396200 ms`; 77 unresolved spans; 30 primary-consensus spans; and 0 corrected words/segments. The before/after transcript diff is empty because no candidate passed every conservative gate.
+- Tier 1 review confirmed the fail-safe gates: `휘익` versus caption/secondary `휙` stayed unchanged because secondary probability was `0.7642`; `명은` versus consensus `병은` stayed unchanged because temporal overlap was `0.6957`, below `0.70`; and `글을` versus consensus `그를` stayed unchanged because that segment could not be reconstructed exactly from Whisper words. At 68 seconds the final transcript remains audio-first and the `t=68s` URL did not truncate processing.
+- Verification: Python `169 passed, 2 skipped`; Ruff and `git diff --check` passed. No `KOREAN_RECONCILIATION_UNAVAILABLE` or fallback warning occurred in the real smoke.
+
+### 2026-08-04 - Korean reconciliation accuracy v2
+
+- Added a Korean Tier 1-only surface mapper for Whisper segments whose text and word list differ only by whitespace. Corrections now replace the exact word range in the original segment surface while preserving surrounding Korean spacing and punctuation; Tier 2/3 and non-whitespace mismatches remain unresolved.
+- Added a Korean Tier 1 temporal-overlap tolerance of `0.01` without changing the public `0.70` gate or the existing coverage and secondary confidence thresholds. Partial secondary words and three-source disagreement remain unresolved.
+- Korean verification now permits 100 windows while retaining the 600,000 ms total secondary-audio limit. Japanese remains at 60 windows. Alignment version is `monotonic_char_word_v3` and transcript cache pipeline version is `6`; artifact schema remains `3`.
+- Real smoke job `c0860f6f-760b-4087-b1b3-d623e1266734` completed `aSSO1cy5-08` in about 468 seconds with `source=whisper`, `language=ko`, confidence `0.9990234375`, 503 segments, 4,439 words, and word timestamps on every segment.
+- Smoke audit: alignment coverage `0.9813496`; all 149 suspicious spans selected and processed; 97 secondary windows covering `582740 ms`; 56 primary-consensus spans; 91 unresolved spans; 0 budget-skipped spans; and 2 corrected words/segments.
+- Published corrections were exactly `명은 → 병은` through the Tier 1 timestamp tolerance and `글을 → 그를` through whitespace-only surface mapping. Compared with v5 job `c2835f76-8cba-4a68-9ffe-2f4dd6041c25`, these were the only two segment text changes.
+- Risky Tier 3 consensus remained unchanged as required: `맞고` was not changed to `맑고`, `새물을` was not changed to `세물을`, `집안` was not changed to `지방`, and `밤사이` was not changed to `감사히`. `신의/시내` partial-word cases also remained unresolved.
+- Verification: Python `177 passed, 2 skipped`; Ruff and `git diff --check` passed. Smoke produced no fallback, unavailable, or budget-limit warning.

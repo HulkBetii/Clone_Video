@@ -24,18 +24,38 @@ DECISION_SKIPPED = "skipped"
 RECONCILED_WARNING = "JAPANESE_TRANSCRIPT_RECONCILED"
 UNRESOLVED_WARNING = "JAPANESE_RECONCILIATION_UNRESOLVED"
 LIMIT_WARNING = "JAPANESE_RECONCILIATION_LIMIT_REACHED"
-ALIGNMENT_VERSION = "monotonic_char_word_v1"
+KOREAN_RECONCILED_WARNING = "KOREAN_TRANSCRIPT_RECONCILED"
+KOREAN_UNRESOLVED_WARNING = "KOREAN_RECONCILIATION_UNRESOLVED"
+KOREAN_LIMIT_WARNING = "KOREAN_RECONCILIATION_LIMIT_REACHED"
+ALIGNMENT_VERSION = "monotonic_char_word_v3"
 
-_NOISE_LABELS = ("音楽", "拍手", "歓声", "笑い", "music", "applause")
-_NOISE_PATTERN = re.compile(
-    r"(?:\[(?:"
-    + "|".join(_NOISE_LABELS)
-    + r")\]|【(?:"
-    + "|".join(_NOISE_LABELS)
-    + r")】|\((?:"
-    + "|".join(_NOISE_LABELS)
-    + r")\)|♪+)"
+_NOISE_LABELS = (
+    "\u97f3\u697d",
+    "\u62cd\u624b",
+    "\u6b53\u58f0",
+    "\u7b11\u3044",
+    "\uc74c\uc545",
+    "\ubc15\uc218",
+    "\uc6c3\uc74c",
+    "\ud658\ud638",
+    "music",
+    "applause",
 )
+_NOISE_ALTERNATION = "|".join(re.escape(label) for label in _NOISE_LABELS)
+_NOISE_PATTERN = re.compile(
+    rf"(?:\[(?:{_NOISE_ALTERNATION})\]|"
+    rf"\u3010(?:{_NOISE_ALTERNATION})\u3011|"
+    rf"\((?:{_NOISE_ALTERNATION})\)|\u266a+)"
+)
+
+_WARNING_CODES = {
+    "ja": (RECONCILED_WARNING, UNRESOLVED_WARNING, LIMIT_WARNING),
+    "ko": (
+        KOREAN_RECONCILED_WARNING,
+        KOREAN_UNRESOLVED_WARNING,
+        KOREAN_LIMIT_WARNING,
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -140,13 +160,16 @@ class _SecondaryWindowAlignment:
     segments: Sequence[TranscriptSegment]
 
 
-def normalize_japanese_text(value: str) -> str:
+def normalize_alignment_text(value: str, language: str) -> str:
     normalized = unicodedata.normalize("NFKC", value).casefold()
+    base_language = _base_language(language)
+    if base_language == "ko":
+        normalized = unicodedata.normalize("NFC", normalized)
     normalized = _NOISE_PATTERN.sub("", normalized)
     characters = []
     for character in normalized:
         codepoint = ord(character)
-        if 0x30A1 <= codepoint <= 0x30F6:
+        if base_language == "ja" and 0x30A1 <= codepoint <= 0x30F6:
             character = chr(codepoint - 0x60)
         if unicodedata.category(character)[0] in {"P", "S", "Z", "C"}:
             continue
@@ -154,9 +177,13 @@ def normalize_japanese_text(value: str) -> str:
     return "".join(characters)
 
 
-def japanese_text_similarity(first: str, second: str) -> float:
-    normalized_first = normalize_japanese_text(first)
-    normalized_second = normalize_japanese_text(second)
+def normalize_japanese_text(value: str) -> str:
+    return normalize_alignment_text(value, "ja")
+
+
+def text_similarity(first: str, second: str, language: str) -> float:
+    normalized_first = normalize_alignment_text(first, language)
+    normalized_second = normalize_alignment_text(second, language)
     if not normalized_first or not normalized_second:
         return 0.0
     if normalized_first == normalized_second:
@@ -164,9 +191,14 @@ def japanese_text_similarity(first: str, second: str) -> float:
     return SequenceMatcher(None, normalized_first, normalized_second, autojunk=False).ratio()
 
 
+def japanese_text_similarity(first: str, second: str) -> float:
+    return text_similarity(first, second, "ja")
+
+
 def build_character_timeline(
     segments: Sequence[TranscriptSegment],
     *,
+    language: str = "ja",
     deduplicate_rolling: bool = False,
     min_anchor_chars: int = 4,
 ) -> list[AlignmentCharacter]:
@@ -175,7 +207,9 @@ def build_character_timeline(
     previous_end_ms = -1
     for segment_position, segment in enumerate(segments):
         timeline_words = _timeline_words(segment)
-        segment_text = "".join(normalize_japanese_text(word.text) for word in timeline_words)
+        segment_text = "".join(
+            normalize_alignment_text(word.text, language) for word in timeline_words
+        )
         trim_characters = 0
         if deduplicate_rolling and previous_text and segment.start_ms <= previous_end_ms + 1_500:
             trim_characters = _rolling_prefix_length(
@@ -186,7 +220,7 @@ def build_character_timeline(
 
         remaining_trim = trim_characters
         for timeline_word in timeline_words:
-            normalized_word = normalize_japanese_text(timeline_word.text)
+            normalized_word = normalize_alignment_text(timeline_word.text, language)
             if not normalized_word:
                 continue
             word_trim = min(remaining_trim, len(normalized_word))
@@ -221,6 +255,7 @@ def align_character_timelines(
     primary: Sequence[AlignmentCharacter],
     caption: Sequence[AlignmentCharacter],
     *,
+    language: str = "ja",
     window_ms: int = 60_000,
     overlap_ms: int = 5_000,
     min_anchor_chars: int = 4,
@@ -269,7 +304,7 @@ def align_character_timelines(
         primary_word_characters = [
             character for character in primary if character.word_index == word_index
         ]
-        if normalize_japanese_text(caption_word_text) == "".join(
+        if normalize_alignment_text(caption_word_text, language) == "".join(
             character.text for character in primary_word_characters
         ):
             matched_primary.update(character.index for character in primary_word_characters)
@@ -298,8 +333,10 @@ def align_segment_to_captions(
     segment: TranscriptSegment,
     captions: Sequence[TranscriptSegment],
     settings: Settings,
+    *,
+    language: str = "ja",
 ) -> CharacterAlignment:
-    primary_timeline = build_character_timeline([segment])
+    primary_timeline = build_character_timeline([segment], language=language)
     caption_candidates = [
         caption
         for caption in captions
@@ -308,12 +345,14 @@ def align_segment_to_captions(
     ]
     caption_timeline = build_character_timeline(
         caption_candidates,
+        language=language,
         deduplicate_rolling=True,
         min_anchor_chars=settings.reconciliation_min_anchor_chars,
     )
     return align_character_timelines(
         primary_timeline,
         caption_timeline,
+        language=language,
         window_ms=settings.reconciliation_alignment_window_ms,
         overlap_ms=settings.reconciliation_alignment_overlap_ms,
         min_anchor_chars=settings.reconciliation_min_anchor_chars,
@@ -324,12 +363,15 @@ def build_reconciliation_plan(
     primary_segments: Sequence[TranscriptSegment],
     caption_segments: Sequence[TranscriptSegment],
     settings: Settings,
+    *,
+    language: str = "ja",
 ) -> ReconciliationPlan:
     spans: list[SuspiciousSpan] = []
     compared_segments = 0
-    primary_timeline = build_character_timeline(primary_segments)
+    primary_timeline = build_character_timeline(primary_segments, language=language)
     caption_timeline = build_character_timeline(
         caption_segments,
+        language=language,
         deduplicate_rolling=True,
         min_anchor_chars=settings.reconciliation_min_anchor_chars,
     )
@@ -367,7 +409,7 @@ def build_reconciliation_plan(
             if caption_text:
                 segment_compared = True
             similarity = (
-                japanese_text_similarity(word.text, caption_text) if caption_text else None
+                text_similarity(word.text, caption_text, language) if caption_text else None
             )
             low_confidence = (
                 word.probability is not None
@@ -429,7 +471,7 @@ def build_reconciliation_plan(
         if segment_compared:
             compared_segments += 1
 
-    windows, skipped_span_ids = _build_windows(spans, settings)
+    windows, skipped_span_ids = _build_windows(spans, settings, language=language)
     return ReconciliationPlan(
         compared_segments=compared_segments,
         alignment_coverage=(
@@ -446,6 +488,8 @@ def apply_reconciliation(
     plan: ReconciliationPlan,
     secondary_segments: Mapping[int, Sequence[TranscriptSegment]],
     settings: Settings,
+    *,
+    language: str = "ja",
 ) -> ReconciliationOutcome:
     replacements: dict[tuple[int, int, int], list[WordTimestamp]] = {}
     items = []
@@ -458,6 +502,7 @@ def apply_reconciliation(
         plan.windows,
         secondary_segments,
         settings,
+        language=language,
     )
     window_by_span_id = {
         span_id: window for window in plan.windows for span_id in window.span_ids
@@ -467,6 +512,12 @@ def apply_reconciliation(
         for position, segment in enumerate(primary_segments)
         if segment.words and "".join(word.text for word in segment.words) == segment.text
     }
+    surface_word_spans = {}
+    for position, segment in enumerate(primary_segments):
+        word_spans = _build_surface_word_spans(segment)
+        if word_spans is not None:
+            surface_word_spans[position] = word_spans
+    surface_mapped_segments: set[int] = set()
 
     for span in plan.spans:
         selected_window = window_by_span_id.get(span.id)
@@ -478,7 +529,7 @@ def apply_reconciliation(
             if selected_window is not None
             else None
         )
-        decision, reason = _decide(span, evidence, settings)
+        decision, reason = _decide(span, evidence, settings, language=language)
         final_text = span.primary_text
         if span.id in plan.skipped_span_ids:
             decision = DECISION_SKIPPED
@@ -491,8 +542,15 @@ def apply_reconciliation(
                 decision == DECISION_CORRECTED
                 and span.segment_position not in reconstructable_segments
             ):
-                decision = DECISION_UNRESOLVED
-                reason = "segment_words_not_reconstructable"
+                if (
+                    _base_language(language) == "ko"
+                    and span.priority_tier == 1
+                    and span.segment_position in surface_word_spans
+                ):
+                    surface_mapped_segments.add(span.segment_position)
+                else:
+                    decision = DECISION_UNRESOLVED
+                    reason = "segment_words_not_reconstructable"
             if decision == DECISION_CORRECTED and evidence is not None:
                 replacement_key = (span.segment_position, span.word_start, span.word_end)
                 replacements[replacement_key] = evidence.words
@@ -533,16 +591,23 @@ def apply_reconciliation(
             )
         )
 
-    final_segments = _apply_word_replacements(primary_segments, replacements)
+    final_segments = _apply_word_replacements(
+        primary_segments,
+        replacements,
+        surface_word_spans={
+            position: surface_word_spans[position] for position in surface_mapped_segments
+        },
+    )
     corrected_segment_positions = {position for position, _, _ in replacements}
     corrected_words = sum(end - start for _, start, end in replacements)
     warnings = []
+    reconciled_warning, unresolved_warning, limit_warning = _warning_codes(language)
     if replacements:
-        warnings.append(RECONCILED_WARNING)
+        warnings.append(reconciled_warning)
     if unresolved_count:
-        warnings.append(UNRESOLVED_WARNING)
+        warnings.append(unresolved_warning)
     if skipped_count:
-        warnings.append(LIMIT_WARNING)
+        warnings.append(limit_warning)
     reconciliation = TranscriptReconciliation(
         alignment_version=ALIGNMENT_VERSION,
         secondary_model=settings.reconciliation_model,
@@ -874,6 +939,8 @@ def _slice_character_timeline(
 def _build_windows(
     spans: Sequence[SuspiciousSpan],
     settings: Settings,
+    *,
+    language: str = "ja",
 ) -> tuple[list[ReconciliationWindow], set[int]]:
     raw_candidates: list[tuple[int, int, list[int]]] = []
     skipped_span_ids = set()
@@ -923,7 +990,11 @@ def _build_windows(
         )
     selected, budget_skipped = select_windows(
         candidates,
-        max_windows=settings.reconciliation_max_windows,
+        max_windows=(
+            settings.reconciliation_korean_max_windows
+            if _base_language(language) == "ko"
+            else settings.reconciliation_max_windows
+        ),
         max_total_ms=settings.reconciliation_max_total_ms,
     )
     skipped_span_ids.update(budget_skipped)
@@ -944,8 +1015,10 @@ def _build_secondary_window_alignments(
     windows: Sequence[ReconciliationWindow],
     secondary_segments: Mapping[int, Sequence[TranscriptSegment]],
     settings: Settings,
+    *,
+    language: str = "ja",
 ) -> dict[int, _SecondaryWindowAlignment]:
-    primary_timeline = build_character_timeline(primary_segments)
+    primary_timeline = build_character_timeline(primary_segments, language=language)
     alignments = {}
     for window in windows:
         segments = secondary_segments.get(window.index)
@@ -956,7 +1029,7 @@ def _build_secondary_window_alignments(
             start_ms=window.start_ms,
             end_ms=window.end_ms,
         )
-        secondary_timeline = build_character_timeline(segments)
+        secondary_timeline = build_character_timeline(segments, language=language)
         pairs = _monotonic_pairs(
             primary_window,
             secondary_timeline,
@@ -1055,6 +1128,8 @@ def _decide(
     span: SuspiciousSpan,
     evidence: _SecondaryEvidence | None,
     settings: Settings,
+    *,
+    language: str = "ja",
 ) -> tuple[str, str]:
     if evidence is None:
         return DECISION_UNRESOLVED, "secondary_missing"
@@ -1065,8 +1140,25 @@ def _decide(
         < settings.reconciliation_min_alignment_coverage
     ):
         return DECISION_UNRESOLVED, "alignment_coverage_low"
+    primary = normalize_alignment_text(span.primary_text, language)
+    caption = normalize_alignment_text(span.caption_text or "", language)
+    secondary = normalize_alignment_text(evidence.text, language)
+    if not primary or not caption or not secondary:
+        return DECISION_UNRESOLVED, "evidence_empty"
+
+    caption_secondary_consensus = caption == secondary
+    temporal_tolerance = (
+        settings.reconciliation_korean_temporal_overlap_tolerance
+        if _base_language(language) == "ko"
+        and span.priority_tier == 1
+        and caption_secondary_consensus
+        else 0.0
+    )
     temporal_overlap = min(span.temporal_overlap, evidence.temporal_overlap)
-    if temporal_overlap < settings.reconciliation_min_temporal_overlap:
+    if (
+        temporal_overlap + temporal_tolerance
+        < settings.reconciliation_min_temporal_overlap
+    ):
         return DECISION_UNRESOLVED, "temporal_overlap_low"
     if (
         evidence.mean_probability is None
@@ -1079,14 +1171,9 @@ def _decide(
     ):
         return DECISION_UNRESOLVED, "secondary_min_probability_low"
 
-    primary = normalize_japanese_text(span.primary_text)
-    caption = normalize_japanese_text(span.caption_text or "")
-    secondary = normalize_japanese_text(evidence.text)
-    if not primary or not caption or not secondary:
-        return DECISION_UNRESOLVED, "evidence_empty"
     if primary in (secondary, caption):
         return DECISION_KEPT_PRIMARY, "primary_consensus"
-    if caption == secondary:
+    if caption_secondary_consensus:
         return DECISION_CORRECTED, "caption_secondary_consensus"
     return DECISION_UNRESOLVED, "consensus_missing"
 
@@ -1094,6 +1181,8 @@ def _decide(
 def _apply_word_replacements(
     primary_segments: Sequence[TranscriptSegment],
     replacements: Mapping[tuple[int, int, int], Sequence[WordTimestamp]],
+    *,
+    surface_word_spans: Mapping[int, Sequence[tuple[int, int]]] | None = None,
 ) -> list[TranscriptSegment]:
     results = []
     by_segment: dict[int, dict[tuple[int, int], Sequence[WordTimestamp]]] = {}
@@ -1118,15 +1207,83 @@ def _apply_word_replacements(
             end_index, replacement_words = replacement
             rebuilt_words.extend(word.model_copy(deep=True) for word in replacement_words)
             word_index = end_index
+        rebuilt_text = "".join(word.text for word in rebuilt_words)
+        segment_surface_spans = (surface_word_spans or {}).get(segment_position)
+        if segment_surface_spans is not None:
+            rebuilt_text = _apply_surface_text_replacements(
+                segment.text,
+                segment_surface_spans,
+                segment_replacements,
+            )
         results.append(
             segment.model_copy(
                 update={
-                    "text": "".join(word.text for word in rebuilt_words),
+                    "text": rebuilt_text,
                     "words": rebuilt_words,
                 }
             )
         )
     return results
+
+
+def _build_surface_word_spans(
+    segment: TranscriptSegment,
+) -> tuple[tuple[int, int], ...] | None:
+    if not segment.words:
+        return None
+    surface_positions = [
+        index for index, character in enumerate(segment.text) if not character.isspace()
+    ]
+    compact_words = [
+        "".join(character for character in word.text if not character.isspace())
+        for word in segment.words
+    ]
+    if any(not word for word in compact_words):
+        return None
+    if "".join(compact_words) != "".join(
+        character for character in segment.text if not character.isspace()
+    ):
+        return None
+
+    spans = []
+    compact_start = 0
+    for word_position, compact_word in enumerate(compact_words):
+        compact_end = compact_start + len(compact_word)
+        surface_start = (
+            0 if compact_start == 0 else surface_positions[compact_start - 1] + 1
+        )
+        surface_end = surface_positions[compact_end - 1] + 1
+        if word_position == len(compact_words) - 1:
+            surface_end = len(segment.text)
+        spans.append((surface_start, surface_end))
+        compact_start = compact_end
+    return tuple(spans)
+
+
+def _apply_surface_text_replacements(
+    surface_text: str,
+    word_spans: Sequence[tuple[int, int]],
+    replacements: Mapping[tuple[int, int], Sequence[WordTimestamp]],
+) -> str:
+    result = surface_text
+    for (word_start, word_end), replacement_words in sorted(
+        replacements.items(),
+        reverse=True,
+    ):
+        surface_start = word_spans[word_start][0]
+        surface_end = word_spans[word_end - 1][1]
+        original = result[surface_start:surface_end]
+        leading_whitespace = original[: len(original) - len(original.lstrip())]
+        trailing_whitespace = original[len(original.rstrip()) :]
+        replacement = "".join(word.text for word in replacement_words).strip()
+        result = (
+            result[:surface_start]
+            + leading_whitespace
+            + replacement
+            + trailing_whitespace
+            + result[surface_end:]
+        )
+    return result
 
 
 def _range_temporal_overlap(
@@ -1153,6 +1310,14 @@ def _primary_temporal_coverage(
 
 def _range_midpoint(start_ms: int, end_ms: int) -> float:
     return start_ms + (end_ms - start_ms) / 2
+
+
+def _base_language(language: str) -> str:
+    return language.strip().lower().replace("_", "-").split("-", 1)[0]
+
+
+def _warning_codes(language: str) -> tuple[str, str, str]:
+    return _WARNING_CODES.get(_base_language(language), _WARNING_CODES["ja"])
 
 
 def _contains_japanese_text(value: str) -> bool:
