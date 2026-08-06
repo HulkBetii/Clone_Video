@@ -10,7 +10,7 @@
 
 - Phase: Local web UI and auto-GPT workspace pipeline implemented
 - Backend: YouTube transcript and Playwright GPT rewrite APIs implemented; real-profile full rewrite completed against the current ChatGPT UI
-- Frontend/UI: React/Vite SPA implemented and served by FastAPI; desktop/mobile E2E and browser QA passed
+- Frontend/UI: React/Vite SPA synchronized with current backend contracts, including Japanese/Korean transcript quality audit; desktop/mobile E2E and browser QA passed
 - Skills: Not installed yet
 - Repository: Python 3.11 FastAPI project with SQLite job persistence
 
@@ -29,6 +29,7 @@
 - Added workspace coordinator APIs that chain completed transcript jobs into rewrite jobs, survive closed tabs/restarts, and map recoverable GPT failures to `waiting_for_user`.
 - Added GPT runtime controls for opening, checking, and closing the headed `PROFILE_GPT_1` browser without importing credentials.
 - Added the React/TypeScript/Vite local SPA with responsive create, library, workspace, and system routes; artifacts load lazily and the UI remains read-only in v1.
+- Synchronized frontend contracts and quality presentation with transcript artifact schema 3, including lazy reconciliation audit loading, published corrections, grouped unresolved reasons, and typed health/GPT runtime states.
 - Added static SPA fallback serving from FastAPI and generated production assets under `src/yt_pro_max/static`.
 - Added unit/integration tests and an opt-in live YouTube smoke test.
 
@@ -230,3 +231,12 @@ Keep the backend/UI release stable while adding future workspace stages. Whisper
 - Published corrections were exactly `명은 → 병은` through the Tier 1 timestamp tolerance and `글을 → 그를` through whitespace-only surface mapping. Compared with v5 job `c2835f76-8cba-4a68-9ffe-2f4dd6041c25`, these were the only two segment text changes.
 - Risky Tier 3 consensus remained unchanged as required: `맞고` was not changed to `맑고`, `새물을` was not changed to `세물을`, `집안` was not changed to `지방`, and `밤사이` was not changed to `감사히`. `신의/시내` partial-word cases also remained unresolved.
 - Verification: Python `177 passed, 2 skipped`; Ruff and `git diff --check` passed. Smoke produced no fallback, unavailable, or budget-limit warning.
+
+### 2026-08-06 - Frontend/backend contract synchronization
+
+- Tightened frontend TypeScript models to match the current workspace, transcript, rewrite, health, and GPT runtime Pydantic responses; removed frontend-only response fields.
+- Added a defensive schema 3 transcript artifact parser and a lazy TanStack Query that runs only for a completed transcript while the Transcript tab is open. Malformed or older JSON audit data no longer blocks TXT preview or artifact downloads.
+- Updated Create, Library, Workspace, and System pages for Japanese/Korean audio-first behavior, transcript source/cache state, friendly warning/error copy, Whisper runtime details, and reconciliation quality metrics.
+- The Workspace quality panel lists only published corrections and groups unresolved decisions by reason. Real job `9dc1d29b-c179-4264-9b13-0d13355b0ac1` displays confidence `99.90%`, alignment `98.13%`, `149/149` processed spans, 97 secondary windows, 2 corrected words, and 91 unresolved spans, including `명은 -> 병은` and `글을 -> 그를`.
+- The Library does not fetch transcript artifacts. Expected unresolved consensus is labeled `Đối chiếu bảo thủ`, while unavailable, limit, low-confidence, and CPU-fallback warnings remain attention states.
+- Verification: frontend typecheck and lint passed; Vitest `16 passed`; Playwright E2E `3 passed`; production build passed; Python `177 passed, 2 skipped`; Ruff and `git diff --check` passed. Live FastAPI browser QA passed on desktop and a 390px mobile viewport without horizontal overflow.

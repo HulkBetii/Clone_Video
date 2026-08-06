@@ -23,6 +23,20 @@ export function formatDuration(seconds?: number | null) {
   return hours ? `${hours} giờ ${String(minutes).padStart(2, "0")} phút` : `${minutes}:${String(remaining).padStart(2, "0")}`;
 }
 
+export function formatMilliseconds(milliseconds?: number | null) {
+  if (milliseconds == null || !Number.isFinite(milliseconds)) return "—";
+  return formatDuration(milliseconds / 1000);
+}
+
+export function formatConfidence(value?: number | null) {
+  if (value == null || !Number.isFinite(value)) return "—";
+  return new Intl.NumberFormat("vi-VN", {
+    style: "percent",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value);
+}
+
 export function formatDate(value?: string) {
   if (!value) return "Chưa ghi nhận";
   const date = new Date(value);

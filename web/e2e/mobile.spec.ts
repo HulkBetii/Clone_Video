@@ -1,10 +1,11 @@
 import { expect, test } from "@playwright/test";
 
-import { workspace } from "./fixtures";
+import { transcriptArtifact, workspace } from "./fixtures";
 
 test("keeps compare content readable in the mobile layout", async ({ page }) => {
   await page.route("**/api/v1/workspaces/source-001", (route) => route.fulfill({ json: workspace }));
   await page.route("**/api/v1/transcript-jobs/source-001/artifacts/txt", (route) => route.fulfill({ contentType: "text/plain", body: "Title: Gốc\n\nNội dung gốc." }));
+  await page.route("**/api/v1/transcript-jobs/source-001/artifacts/json", (route) => route.fulfill({ json: transcriptArtifact }));
   await page.route("**/api/v1/rewrite-jobs/rewrite-001/artifacts/txt", (route) => route.fulfill({ contentType: "text/plain", body: "Title: SEO mới\n\nNội dung mới sẵn sàng cho TTS." }));
 
   await page.goto("/workspaces/source-001");

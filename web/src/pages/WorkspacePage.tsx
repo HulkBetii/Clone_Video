@@ -1,16 +1,18 @@
 import * as Tabs from "@radix-ui/react-tabs";
 import * as Tooltip from "@radix-ui/react-tooltip";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, ArrowLeft, Check, Clipboard, Download, ExternalLink, FileJson, FileText, Gauge, Languages, RefreshCw, Sparkles, Subtitles } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Check, Clipboard, Download, ExternalLink, FileJson, FileText, Gauge, Languages, RefreshCw, ShieldCheck, Sparkles, Subtitles } from "lucide-react";
 import { type ReactNode, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { PipelineRail, stageLabel } from "../components/PipelineRail";
 import { ErrorNotice, ProgressBar, Skeleton, StatusPill } from "../components/ui";
-import { useArtifact, useWorkspace } from "../hooks/queries";
+import { useArtifact, useTranscriptArtifact, useWorkspace } from "../hooks/queries";
 import { checkGptRuntime, openGptRuntime, resumeWorkspace } from "../lib/api";
-import { formatDate, formatDuration, parseTextArtifact, ratio, validationLabel } from "../lib/content";
-import type { ValidationSummary } from "../types";
+import { formatConfidence, formatDate, formatDuration, formatMilliseconds, parseTextArtifact, ratio, validationLabel } from "../lib/content";
+import { localizedErrorMessage, reconciliationReasonLabel, transcriptSourceCopy, transcriptWarningCopy } from "../lib/presentation";
+import { summarizeTranscriptArtifact, type TranscriptQualitySummary } from "../lib/transcriptQuality";
+import type { TranscriptArtifact, TranscriptJob, ValidationSummary } from "../types";
 import styles from "./WorkspacePage.module.css";
 
 type ContentTab = "transcript" | "rewrite" | "compare";
@@ -23,11 +25,14 @@ export function WorkspacePage() {
   const queryClient = useQueryClient();
   const workspace = workspaceQuery.data;
   const transcriptUrl = workspace?.transcript?.artifacts?.txt;
+  const transcriptJsonUrl = workspace?.transcript?.artifacts?.json;
   const rewriteUrl = workspace?.rewrite?.artifacts?.txt;
   const transcriptArtifact = useArtifact(transcriptUrl, tab === "transcript" || tab === "compare");
+  const transcriptJsonArtifact = useTranscriptArtifact(transcriptJsonUrl, tab === "transcript" && workspace?.transcript.status === "completed");
   const rewriteArtifact = useArtifact(rewriteUrl, tab === "rewrite" || tab === "compare");
   const transcriptText = useMemo(() => parseTextArtifact(transcriptArtifact.data ?? ""), [transcriptArtifact.data]);
   const rewriteText = useMemo(() => parseTextArtifact(rewriteArtifact.data ?? ""), [rewriteArtifact.data]);
+  const transcriptQuality = useMemo(() => transcriptJsonArtifact.data ? summarizeTranscriptArtifact(transcriptJsonArtifact.data) : null, [transcriptJsonArtifact.data]);
   const resumeMutation = useMutation({ mutationFn: () => resumeWorkspace(workspaceId), onSuccess: (data) => queryClient.setQueryData(["workspace", workspaceId], data) });
   const openMutation = useMutation({ mutationFn: () => openGptRuntime(workspace?.rewrite?.id) });
   const continueMutation = useMutation({
@@ -50,10 +55,11 @@ export function WorkspacePage() {
   const validation = workspace.rewrite?.validation;
   const rewriteError = workspace.rewrite?.error;
   const canResumeRewrite = Boolean(rewriteError && (rewriteError.code === "GPT_LOGIN_REQUIRED" || rewriteError.code === "GPT_PROFILE_LOCKED" || (rewriteError.code.startsWith("GPT_") && rewriteError.retryable)));
-  const actionMessage = typeof workspace.action_required === "string" ? workspace.action_required : workspace.action_required?.message;
+  const actionMessage = workspace.action_required ? localizedErrorMessage(workspace.action_required.code, workspace.action_required.message) : null;
   const sourceLength = workspace.rewrite?.source_length ?? transcriptText.body.length;
   const outputLength = workspace.rewrite?.output_length ?? rewriteText.body.length;
   const lengthRatio = validation?.length_ratio ?? ratio(sourceLength, outputLength);
+  const source = transcriptSourceCopy(workspace.transcript.source);
 
   return (
     <div className="page">
@@ -62,7 +68,7 @@ export function WorkspacePage() {
         <div className={styles.heroCopy}>
           <div className={styles.kicker}><StatusPill status={workspace.status} /><span>{video?.id || workspaceId.slice(0, 8)}</span></div>
           <h1>{video?.title || "Đang lấy tiêu đề video..."}</h1>
-          <div className={styles.videoMeta}><span>{video?.channel || "Kênh chưa xác định"}</span><span>{formatDuration(video?.duration_seconds)}</span><span>{workspace.transcript?.language || "—"}</span><span>Cập nhật {formatDate(workspace.updated_at)}</span></div>
+          <div className={styles.videoMeta}><span>{video?.channel || "Kênh chưa xác định"}</span><span>{formatDuration(video?.duration_seconds)}</span><span>{workspace.transcript.language || "—"}</span><span>{source.label}</span><span>{workspace.transcript.cached ? "Từ cache" : "Xử lý mới"}</span><span>Cập nhật {formatDate(workspace.updated_at)}</span></div>
         </div>
         {video?.webpage_url && <a href={video.webpage_url} className="button secondary" target="_blank" rel="noreferrer">Mở YouTube <ExternalLink size={15} /></a>}
       </header>
@@ -77,8 +83,8 @@ export function WorkspacePage() {
         <button className="button secondary" onClick={() => openMutation.mutate()} disabled={openMutation.isPending}>Mở ChatGPT</button>
         <button className="button coral" onClick={() => continueMutation.mutate()} disabled={continueMutation.isPending}>{continueMutation.isPending ? "Đang kiểm tra..." : "Kiểm tra & tiếp tục"}</button>
       </section>}
-      {workspace.status === "failed" && workspace.rewrite?.error && <ErrorNotice title="Rewrite thất bại" message={workspace.rewrite.error.message} code={workspace.rewrite.error.code} />}
-      {workspace.status === "failed" && workspace.transcript?.error && <ErrorNotice title="Transcript thất bại" message={workspace.transcript.error.message} code={workspace.transcript.error.code} />}
+      {workspace.status === "failed" && workspace.rewrite?.error && <ErrorNotice title="Rewrite thất bại" message={localizedErrorMessage(workspace.rewrite.error.code, workspace.rewrite.error.message)} code={workspace.rewrite.error.code} />}
+      {workspace.status === "failed" && workspace.transcript.error && <ErrorNotice title="Transcript thất bại" message={localizedErrorMessage(workspace.transcript.error.code, workspace.transcript.error.message)} code={workspace.transcript.error.code} />}
       {workspace.status === "failed" && canResumeRewrite && <button className="button secondary" onClick={() => resumeMutation.mutate()} disabled={resumeMutation.isPending}><RefreshCw size={15} />Thử tiếp tục</button>}
 
       <Tabs.Root className={`card ${styles.contentCard}`} value={tab} onValueChange={(value) => setTab(value as ContentTab)}>
@@ -88,6 +94,7 @@ export function WorkspacePage() {
           <Tabs.Trigger value="compare" disabled={!workspace.rewrite}><Gauge size={16} />So sánh</Tabs.Trigger>
         </Tabs.List>
         <Tabs.Content value="transcript" className={styles.tabContent}>
+          <TranscriptQualityPanel job={workspace.transcript} artifact={transcriptJsonArtifact.data} summary={transcriptQuality} loading={transcriptJsonArtifact.isLoading} failed={transcriptJsonArtifact.isError} />
           <ContentHeader title={transcriptText.title || video?.title || "Transcript gốc"} meta={`${sourceLength.toLocaleString("vi-VN")} ký tự`} actions={<ArtifactActions artifacts={workspace.transcript?.artifacts} />} />
           <ArtifactView query={transcriptArtifact} body={transcriptText.body} empty="Transcript sẽ xuất hiện sau khi giai đoạn đầu hoàn tất." />
         </Tabs.Content>
@@ -104,9 +111,41 @@ export function WorkspacePage() {
           <ValidationDetails validation={validation} />
         </Tabs.Content>
       </Tabs.Root>
-      {workspace.transcript?.warnings?.length || workspace.rewrite?.warnings?.length ? <section className={styles.warnings}><strong>Cảnh báo xử lý</strong>{[...(workspace.transcript?.warnings ?? []), ...(workspace.rewrite?.warnings ?? [])].map((warning) => <p key={warning}>{warning}</p>)}</section> : null}
+      <ProcessingNotices warnings={[...workspace.transcript.warnings, ...(workspace.rewrite?.warnings ?? [])]} />
     </div>
   );
+}
+
+function TranscriptQualityPanel({ job, artifact, summary, loading, failed }: { job: TranscriptJob; artifact: TranscriptArtifact | null | undefined; summary: TranscriptQualitySummary | null; loading: boolean; failed: boolean }) {
+  if (job.status !== "completed" || !job.artifacts?.json) return null;
+  if (loading) return <div className={styles.qualityLoading}><Skeleton height={155} /></div>;
+  if (failed || !artifact || !summary) return <section className={styles.qualityUnavailable}><ShieldCheck size={19} /><div><strong>Không đọc được quality audit</strong><p>Preview và download transcript vẫn hoạt động; JSON artifact có thể thuộc schema cũ hoặc không hợp lệ.</p></div></section>;
+
+  const reconciliation = artifact.reconciliation;
+  const source = transcriptSourceCopy(job.source);
+  const metrics = [
+    { label: "Nguồn", value: source.label },
+    { label: "Confidence", value: formatConfidence(job.language_confidence ?? artifact.language_confidence) },
+    { label: "Word timestamps", value: `${summary.segmentsWithWords}/${summary.segmentCount} đoạn` },
+    { label: "Alignment", value: reconciliation?.alignment_coverage == null ? "Không áp dụng" : formatConfidence(reconciliation.alignment_coverage) },
+    { label: "Spans", value: reconciliation ? `${reconciliation.processed_spans}/${reconciliation.selected_spans}` : "Không áp dụng" },
+    { label: "Model phụ", value: reconciliation ? `${reconciliation.secondary_windows} cửa sổ · ${formatMilliseconds(reconciliation.secondary_duration_ms)}` : "Không chạy" },
+    { label: "Đã sửa", value: reconciliation ? `${reconciliation.corrected_words} từ` : "0 từ" },
+    { label: "Chưa chốt", value: reconciliation ? `${reconciliation.unresolved_segments} · bỏ qua ${reconciliation.skipped_segments}` : "Không có" },
+  ];
+
+  return <section className={styles.qualityPanel}>
+    <header className={styles.qualityHeader}><div><span>Transcript quality / schema v{summary.schemaVersion}</span><h2>Đối chiếu với backend</h2><p>{source.description} {reconciliation ? `Audit dùng ${reconciliation.secondary_model} và ${reconciliation.alignment_version}.` : "Nguồn này không cần reconciliation ba nguồn."}</p></div><div className={styles.qualityState}><ShieldCheck size={16} />{job.cached ? "Artifact từ cache" : "Artifact mới"}</div></header>
+    <div className={styles.qualityMetrics}>{metrics.map((metric) => <div key={metric.label}><span>{metric.label}</span><strong>{metric.value}</strong></div>)}</div>
+    {summary.corrections.length > 0 && <section className={styles.corrections}><div className={styles.qualitySectionTitle}><strong>Correction đã xuất bản</strong><span>Chỉ các thay đổi đạt đồng thuận caption + model phụ</span></div><div className={styles.correctionList}>{summary.corrections.map((item) => <div key={`${item.segment_index}-${item.word_start}-${item.start_ms}`}><span>{formatMilliseconds(item.start_ms)}{item.priority_tier ? ` · Tier ${item.priority_tier}` : ""}</span><p><del>{item.primary_text}</del><b>→</b><ins>{item.final_text}</ins></p></div>)}</div></section>}
+    {summary.unresolvedReasons.length > 0 && <section className={styles.unresolved}><div className={styles.qualitySectionTitle}><strong>Giữ nguyên theo chính sách bảo thủ</strong><span>{reconciliation?.unresolved_segments ?? 0} span chưa đủ bằng chứng để sửa</span></div><div className={styles.reasonList}>{summary.unresolvedReasons.map((item) => <span key={item.reason ?? "unknown"}>{reconciliationReasonLabel(item.reason)} <strong>{item.count}</strong></span>)}</div></section>}
+  </section>;
+}
+
+function ProcessingNotices({ warnings }: { warnings: string[] }) {
+  const uniqueWarnings = [...new Set(warnings)];
+  if (!uniqueWarnings.length) return null;
+  return <section className={styles.notices}><div className={styles.qualitySectionTitle}><strong>Thông tin xử lý</strong><span>Thông báo từ transcript và rewrite pipeline</span></div><div className={styles.noticeGrid}>{uniqueWarnings.map((warning) => { const copy = transcriptWarningCopy(warning); return <article key={warning} className={styles[copy.tone]}><div><strong>{copy.title}</strong><p>{copy.description}</p></div><code>{warning}</code></article>; })}</div></section>;
 }
 
 function ContentHeader({ title, meta, actions }: { title: string; meta: string; actions: ReactNode }) {

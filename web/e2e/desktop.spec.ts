@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { health, workspace } from "./fixtures";
+import { health, transcriptArtifact, workspace } from "./fixtures";
 
 test("creates a full workspace and opens its production view", async ({ page }) => {
   await page.route("**/api/v1/workspaces", async (route) => {
@@ -9,6 +9,7 @@ test("creates a full workspace and opens its production view", async ({ page }) 
   });
   await page.route("**/api/v1/workspaces/source-001", (route) => route.fulfill({ json: workspace }));
   await page.route("**/api/v1/transcript-jobs/source-001/artifacts/txt", (route) => route.fulfill({ contentType: "text/plain", body: "Title: Gốc\n\nNội dung gốc." }));
+  await page.route("**/api/v1/transcript-jobs/source-001/artifacts/json", (route) => route.fulfill({ json: transcriptArtifact }));
 
   await page.goto("/");
   await page.getByLabel("Link video YouTube").fill("https://youtu.be/video001");
@@ -17,6 +18,8 @@ test("creates a full workspace and opens its production view", async ({ page }) 
   await expect(page).toHaveURL(/\/workspaces\/source-001$/);
   await expect(page.getByRole("heading", { level: 1, name: "Tiêu đề video gốc" })).toBeVisible();
   await expect(page.getByText("Nội dung gốc.")).toBeVisible();
+  await expect(page.getByText("98,13%")).toBeVisible();
+  await expect(page.getByText("명은")).toBeVisible();
 });
 
 test("checks a manual GPT login and returns runtime to ready", async ({ page }) => {

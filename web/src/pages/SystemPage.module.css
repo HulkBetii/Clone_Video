@@ -22,5 +22,10 @@
 .security strong { display: block; color: var(--muted-strong); font-size: 11px; }
 .security p { margin: 5px 0 0; font-size: 10px; line-height: 1.6; }
 .runtimeError { margin-top: 12px; }
+.whisperNotice { display: flex; gap: 11px; margin-top: 13px; padding: 13px 15px; border: 1px solid #dfbd91; border-radius: 12px; color: #704d32; background: rgba(244,223,207,.52); }
+.whisperNotice svg { flex: 0 0 auto; color: var(--amber); }
+.whisperNotice strong { display: block; font-size: 11px; }
+.whisperNotice p { margin: 4px 0 0; font-size: 10px; }
+.whisperNotice code { margin-left: 5px; color: var(--muted); font-size: 8px; }
 @media (max-width: 1000px) { .grid { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 650px) { .grid { grid-template-columns: 1fr; }.gptPanel { grid-template-columns: auto 1fr; }.gptActions { grid-column: 1 / -1; grid-template-columns: 1fr 1fr; }.gptActions button:last-child { grid-column: 1 / -1; } }

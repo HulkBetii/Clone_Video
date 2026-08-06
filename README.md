@@ -30,7 +30,9 @@ uv run yt-pro-max
 
 The API listens on `http://127.0.0.1:8000`.
 
-The same process serves the production web app at `http://127.0.0.1:8000/`. The UI is a read-only local control room for creating workspaces, following transcript/GPT progress, previewing artifacts, comparing outputs, copying the rewrite body for TTS, and downloading files.
+The same process serves the production web app at `http://127.0.0.1:8000/`. The UI is a read-only local control room for creating workspaces, following transcript/GPT progress, previewing artifacts, comparing outputs, copying the rewrite body for TTS, and downloading files. Transcript JSON audit data is fetched only when the Transcript tab is opened, then cached in the browser for later tab switches.
+
+For Japanese and Korean audio-first jobs, the workspace quality panel shows Whisper confidence, word-timestamp coverage, alignment coverage, processed spans, secondary-model budget, published corrections, and unresolved reasons. The Library uses only workspace metadata and does not download transcript artifacts for its cards.
 
 The first GPT rewrite job requires a logged-in headed Chromium profile. Install the
 Playwright browser once, then stop any other process using the shared profile before
@@ -148,3 +150,5 @@ pnpm --dir web build
 ```
 
 `pnpm --dir web build` publishes the SPA into `src/yt_pro_max/static`, which FastAPI serves with the packaged backend. Vite development proxies `/api`, so no CORS setup is needed.
+
+The frontend contracts mirror the backend Pydantic responses. Unknown warning or error codes fall back to the backend message, while known pipeline codes are presented with Vietnamese user-facing descriptions and retain the technical code as secondary detail.

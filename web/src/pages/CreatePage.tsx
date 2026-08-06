@@ -5,6 +5,7 @@ import { useNavigate } from "react-router-dom";
 
 import { ErrorNotice, PageHeading } from "../components/ui";
 import { ApiError, createWorkspace } from "../lib/api";
+import { localizedErrorMessage } from "../lib/presentation";
 import styles from "./CreatePage.module.css";
 
 export function CreatePage() {
@@ -15,7 +16,7 @@ export function CreatePage() {
   const [forceRefresh, setForceRefresh] = useState(false);
   const createMutation = useMutation({
     mutationFn: createWorkspace,
-    onSuccess: (workspace) => navigate(`/workspaces/${workspace.transcript_job_id || workspace.transcript?.id || workspace.id}`),
+    onSuccess: (workspace) => navigate(`/workspaces/${workspace.id}`),
   });
 
   function submit(event: FormEvent) {
@@ -38,7 +39,7 @@ export function CreatePage() {
           <div className="field">
             <label htmlFor="language">Ngôn ngữ ưu tiên <span className={styles.optional}>không bắt buộc</span></label>
             <input id="language" className="input" placeholder="ja, vi, en-US..." maxLength={20} value={language} onChange={(event) => setLanguage(event.target.value)} />
-            <small className={styles.hint}>Để trống để hệ thống chọn caption gốc hoặc nhận diện bằng Whisper.</small>
+            <small className={styles.hint}>Để trống để hệ thống tự chọn ngôn ngữ gốc. Tiếng Nhật và Hàn dùng audio-first khi chỉ có auto-caption.</small>
           </div>
           <fieldset className={styles.modeGroup}>
             <legend>Luồng xử lý</legend>
@@ -58,13 +59,13 @@ export function CreatePage() {
             <input type="checkbox" checked={forceRefresh} onChange={(event) => setForceRefresh(event.target.checked)} />
             <RefreshCw size={15} /><span>Bỏ qua cache và xử lý lại từ đầu</span>
           </label>
-          {error && <ErrorNotice message={error.message} code={error.code} />}
+          {error && <ErrorNotice message={localizedErrorMessage(error.code, error.message)} code={error.code} />}
           <button className="button coral" type="submit" disabled={createMutation.isPending || !url.trim()}>
             {createMutation.isPending ? "Đang khởi tạo..." : "Bắt đầu xử lý"}<ArrowRight size={17} />
           </button>
         </form>
         <aside className={styles.aside}>
-          <div className={styles.step}><span>01</span><div><strong>Lấy nội dung gốc</strong><p>Ưu tiên caption thủ công, sau đó auto-caption và Whisper.</p></div></div>
+          <div className={styles.step}><span>01</span><div><strong>Lấy nội dung gốc</strong><p>Ưu tiên caption thủ công. Auto-caption Nhật/Hàn được thay bằng Whisper và đối chiếu bảo thủ.</p></div></div>
           <div className={styles.connector} />
           <div className={styles.step}><span>02</span><div><strong>Phân tích & viết lại</strong><p>Giữ giọng điệu, độ phủ ý và độ dài phù hợp cho TTS.</p></div></div>
           <div className={styles.connector} />

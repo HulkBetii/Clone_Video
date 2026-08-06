@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 
 import { App } from "../App";
-import { completedWorkspace } from "../test/fixtures";
+import { completedWorkspace, manualTranscriptArtifact } from "../test/fixtures";
 import { renderApp } from "../test/render";
 import { server } from "../test/server";
 
@@ -16,6 +16,7 @@ it("creates a full workspace by default and opens its detail page", async () => 
     }),
     http.get("/api/v1/workspaces/source-001", () => HttpResponse.json(completedWorkspace)),
     http.get("/api/v1/transcript-jobs/source-001/artifacts/txt", () => HttpResponse.text("Title: Gốc\n\nNội dung gốc.")),
+    http.get("/api/v1/transcript-jobs/source-001/artifacts/json", () => HttpResponse.json(manualTranscriptArtifact)),
   );
 
   renderApp(<App />);

@@ -100,3 +100,13 @@ export async function fetchArtifact(url: string) {
   if (!response.ok) throw new ApiError(response.status, "Không thể tải artifact.");
   return response.text();
 }
+
+export async function fetchJsonArtifact(url: string): Promise<unknown> {
+  const response = await fetch(url);
+  if (!response.ok) throw new ApiError(response.status, "Không thể tải JSON audit.");
+  try {
+    return await response.json();
+  } catch {
+    throw new ApiError(response.status, "JSON audit không hợp lệ.");
+  }
+}

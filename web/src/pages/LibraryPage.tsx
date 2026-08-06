@@ -72,14 +72,14 @@ export function LibraryPage() {
         {workspaces.isLoading && <div className={styles.loading}><Skeleton height={130} /><Skeleton height={130} /><Skeleton height={130} /></div>}
         {workspaces.isError && <div className={styles.notice}><ErrorNotice message={workspaces.error.message} /></div>}
         {workspaces.data?.items.length === 0 && <EmptyState icon={<LibraryBig />} title="Chưa có nội dung">Tạo workspace đầu tiên để lịch sử xử lý xuất hiện tại đây.</EmptyState>}
-        {visibleWorkspaces.map((workspace) => <WorkspaceCard key={workspace.transcript_job_id || workspace.id} workspace={workspace} selectable={isDeletable(workspace)} selected={selectedIds.has(workspaceId(workspace))} onSelect={(selected) => setSelectedIds((current) => { const next = new Set(current); const id = workspaceId(workspace); if (selected) next.add(id); else next.delete(id); return next; })} />)}
+        {visibleWorkspaces.map((workspace) => <WorkspaceCard key={workspace.id} workspace={workspace} selectable={isDeletable(workspace)} selected={selectedIds.has(workspace.id)} onSelect={(selected) => setSelectedIds((current) => { const next = new Set(current); if (selected) next.add(workspace.id); else next.delete(workspace.id); return next; })} />)}
       </div>
     </div>
   );
 }
 
 function workspaceId(workspace: Workspace) {
-  return workspace.transcript_job_id || workspace.transcript?.id || workspace.id;
+  return workspace.id;
 }
 
 function isDeletable(workspace: Workspace) {

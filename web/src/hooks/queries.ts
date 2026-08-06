@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 
-import { fetchArtifact, getGptRuntime, getHealth, getWorkspace, listWorkspaces } from "../lib/api";
+import { fetchArtifact, fetchJsonArtifact, getGptRuntime, getHealth, getWorkspace, listWorkspaces } from "../lib/api";
+import { parseTranscriptArtifact } from "../lib/transcriptQuality";
 import type { WorkspaceStatus } from "../types";
 import { usePageVisible } from "./useVisibility";
 
@@ -33,6 +34,16 @@ export function useArtifact(url: string | undefined, enabled: boolean) {
     enabled: enabled && Boolean(url),
     staleTime: Infinity,
     retry: 1,
+  });
+}
+
+export function useTranscriptArtifact(url: string | undefined, enabled: boolean) {
+  return useQuery({
+    queryKey: ["transcript-artifact", url],
+    queryFn: async () => parseTranscriptArtifact(await fetchJsonArtifact(url!)),
+    enabled: enabled && Boolean(url),
+    staleTime: Infinity,
+    retry: false,
   });
 }
 
